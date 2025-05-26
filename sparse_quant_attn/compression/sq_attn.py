@@ -4,6 +4,23 @@ from typing import Tuple, Optional
 from loguru import logger
 
 
+def smooth_q_k(q, k):
+    """
+    Smooth Q and K by subtracting their means as described in SageAttention2
+    Q: (B, H, L, E) - subtract mean along token dimension for each head
+    K: (B, H, L, E) - subtract global mean along token dimension
+    """
+    # Smooth Q - subtract mean per block (here we use per-head as approximation)
+    q_mean = q.mean(dim=2, keepdim=True)  # (B, H, 1, E)
+    q_smoothed = q - q_mean
+    
+    # Smooth K - subtract global mean across all tokens
+    k_mean = k.mean(dim=2, keepdim=True)  # (B, H, 1, E)
+    k_smoothed = k - k_mean
+    
+    return q_smoothed, k_smoothed, q_mean, k_mean
+
+
 def int4_quant(x: torch.Tensor) -> torch.Tensor:
     """Quantize input tensor to int4 format using symmetric quantization.
     
@@ -155,17 +172,19 @@ def sparsequantattn_prefill(
     v_fp8_int4 = torch.cat([v_fp8, v_int4], dim=2)
     
     # Create block mask and compute attention
+    # TODO 这里会爆显存 看看是什么问题 会导致无法进行评测 校准还好
     block_mask = create_block_mask(
         sink_sliding_window_causal,
         B=None,
         H=q.size(1),
         Q_LEN=q.size(2),
         KV_LEN=k.size(2) * 2,
-        BLOCK_SIZE=16
+        BLOCK_SIZE=128
     )
+    import pdb; pdb.set_trace()
     with torch.no_grad():
         output = flex_attention(q_fp8, k_fp8_int4, v_fp8_int4, block_mask=block_mask, enable_gqa=True)
-    return output, block_mask
+    return output, None
 
 # TODO: implement decode
 
