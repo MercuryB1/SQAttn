@@ -54,6 +54,8 @@ def main():
     parser.add_argument("--tasks", default=None, type=str)
     parser.add_argument("--num_fewshot", type=int, default=0)
     parser.add_argument("--limit", type=int, default=-1)
+    parser.add_argument("--dynamic_shape", action="store_true", help="use dynamic shape for flashattn")
+
     
     args = parser.parse_args()
     seed_everything(args.seed)

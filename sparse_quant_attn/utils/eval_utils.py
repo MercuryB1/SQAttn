@@ -802,7 +802,7 @@ def evaluate(model, tokenizer, args):
             lm,
             tasks=args.tasks,
             num_fewshot=args.num_fewshot,
-            limit=None if args.limit == -1 else args.limit,
+            limit=2048,
         )
         results.update(t_results)
         # logger.info(results)

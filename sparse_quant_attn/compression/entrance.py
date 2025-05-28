@@ -4,7 +4,7 @@ import torch.nn as nn
 from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed, get_named_linears
 from sparse_quant_attn.compression.calibration import get_calib_dataset
-from sparse_quant_attn.compression.attn_fake_quant import replace_attn_for_block
+from sparse_quant_attn.compression.attn_fake_quant import replace_attn_for_block, replace_flashattn_kernel_for_block
 import gc
 from tqdm import tqdm
 import functools
@@ -20,7 +20,9 @@ def compress_model(model, tokenizer, device, args):
         n_samples=args.nsamples,
         seq_len=args.seqlen,
     )
+
     samples = torch.cat(samples, dim=0)
+    samples = samples[0:1]
     logger.info("dataset loading complete")
 
     inps = []
@@ -58,6 +60,9 @@ def compress_model(model, tokenizer, device, args):
     
     gc.collect()
     torch.cuda.empty_cache()
+    # torch.cuda.memory._record_memory_history(
+    #    max_entries=100000
+    # )
 
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
@@ -89,9 +94,10 @@ def compress_model(model, tokenizer, device, args):
             h.remove()
         input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
         
-        logger.info(f"quantizer attn for layer {i}")
+        # logger.info(f"quantizer attn for layer {i}")
         #TODO: quantize attn
-        replace_attn_for_block(layer, input_feat, i)
+        # replace_attn_for_block(layer, input_feat, i)
+        replace_flashattn_kernel_for_block(layer, input_feat, i, args=args)
 
         # update output after compression
         inps = layer(inps, **layer_kwargs)[0]
@@ -99,3 +105,10 @@ def compress_model(model, tokenizer, device, args):
         del input_feat
         layer.cpu()
         torch.cuda.empty_cache()
+
+    # try:
+    #    torch.cuda.memory._dump_snapshot(f"cuda_memory_snapshot.pickle")
+    # except Exception as e:
+    #    logger.error(f"Failed to capture memory snapshot {e}")
+    
+    # torch.cuda.memory._record_memory_history(enabled=None)

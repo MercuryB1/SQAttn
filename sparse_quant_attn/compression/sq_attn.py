@@ -58,6 +58,11 @@ def fp8_quant(x: torch.Tensor) -> torch.Tensor:
     x_fp8 = x.to(torch.float8_e4m3fn)
     return x_fp8.to(torch.bfloat16)
 
+
+def causal_mask(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
+
+
 def sink_sliding_window_multi_mask(
     q_idx: torch.Tensor,
     kv_idx: torch.Tensor,
@@ -139,8 +144,8 @@ def sparsequantattn_prefill(
         3. Add head-wise quantization support
     """
 
-    logger.info(f"q.size: {q.size()}, k.size: {k.size()}, v.size: {v.size()}")
-    # import pdb; pdb.set_trace()
+    # logger.info(f"q.size: {q.size()}, k.size: {k.size()}, v.size: {v.size()}")
+
     kv_len = k.size(2)
     
     def sink_sliding_window_causal(b: int, h: int, q_idx: torch.Tensor, kv_idx: torch.Tensor) -> torch.Tensor:
@@ -166,7 +171,9 @@ def sparsequantattn_prefill(
     v_fp8 = fp8_quant(v).to(dtype=dtype, device=device)
     k_int4 = int4_quant(k).to(dtype=dtype, device=device)
     v_int4 = int4_quant(v).to(dtype=dtype, device=device)
-    
+
+
+    # import pdb; pdb.set_trace()
     # Concatenate FP8 and INT4 tensors
     k_fp8_int4 = torch.cat([k_fp8, k_int4], dim=2)
     v_fp8_int4 = torch.cat([v_fp8, v_int4], dim=2)
@@ -174,16 +181,17 @@ def sparsequantattn_prefill(
     # Create block mask and compute attention
     # TODO 这里会爆显存 看看是什么问题 会导致无法进行评测 校准还好
     block_mask = create_block_mask(
-        sink_sliding_window_causal,
+        sink_sliding_window_multi_mask,
         B=None,
         H=q.size(1),
         Q_LEN=q.size(2),
         KV_LEN=k.size(2) * 2,
         BLOCK_SIZE=128
     )
-    import pdb; pdb.set_trace()
+
     with torch.no_grad():
         output = flex_attention(q_fp8, k_fp8_int4, v_fp8_int4, block_mask=block_mask, enable_gqa=True)
+        # output = flex_attention(q_fp8, k_fp8, v_fp8, block_mask=block_mask, enable_gqa=True)
     return output, None
 
 # TODO: implement decode
