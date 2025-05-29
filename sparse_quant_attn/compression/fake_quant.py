@@ -27,12 +27,12 @@ def quantize_weight_per_tensor_absmax(w, w_bits=8):
 @torch.no_grad()
 def quantize_activation_per_token_absmax(x, a_bits=8):
     x_shape = x.shape
-    x.view(-1, x_shape[-1])
-    scales = x.abs().max(dim=-1, keepdim=True)[0]
+    x = x.view(-1, x_shape[-1])  # 正确 reshape
+    scales = x.abs().max(dim=-1, keepdim=True)[0]  # (num_tokens, 1)
     q_max = 2 ** (a_bits - 1) - 1
-    scales.clamp_(min=1e-5).div_(q_max)
+    scales = scales.clamp(min=1e-5) / q_max
     x.div_(scales).round_().mul_(scales)
-    return x
+    return x.view(*x_shape)
 
 
 @torch.no_grad()

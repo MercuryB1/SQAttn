@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$jsq:$PYTHONPATH
 
@@ -9,6 +9,7 @@ task_name=test
 
 python ${sqattn}/main.py \
 --model Qwen/Qwen2.5-7B \
+--quant \
 --eval_ppl \
 # --tasks wikitext \
 # --batch_size 1 \

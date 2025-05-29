@@ -60,16 +60,16 @@ def get_configs(user_config=None):
     return valid_configs
 
 
-def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size, bit4_window_size, sink_size, tune=False, groups=1):
+def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size=128, bit4_window_size=64, sink_window_size=128, tune=False, groups=1):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
+    # seq_len已经是2倍长度，左半边是8bit，右半边是4bit
     q_shape = [batch, seq_len, heads, dim]
-    kv_shape = [batch, 2 * seq_len, head_kv, dim]
+    kv_shape = [batch, seq_len, head_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
 
     def kernel_func(block_M, block_N, num_stages, threads):
-
         @T.macro
         def MMA0(
             K: T.Tensor(kv_shape, dtype),
@@ -87,20 +87,37 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size, bit4_window_
                     q_idx = bx * block_M + i
                     kv_idx = k * block_N + j
                     
-                    # Int8 part mask
+                    # 1. 8bit部分 (左半边)
+                    # Causal mask: 确保只能看到之前的位置
                     causal_mask = kv_idx <= q_idx
-                    bit8_window_mask = kv_idx >= q_idx - bit8_window_size
-                    sink_mask = kv_idx <= sink_size
+                    # 8bit window mask: 在window范围内的token
+                    bit8_window_mask = kv_idx > q_idx - bit8_window_size
+                    sink_mask = kv_idx < sink_window_size
+                    # 组合8bit部分的mask
                     fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
                     
-                    # Int4 part mask
-                    bit8_window_mask = kv_idx - seq_len <= q_idx - bit8_window_size
-                    bit4_window_mask = kv_idx - seq_len >= q_idx - bit4_window_size
-                    int4_no_sink_mask = kv_idx - seq_len > sink_size
-                    int4_mask = int4_no_sink_mask & bit8_window_mask & bit4_window_mask
+                    # 2. 4bit部分 (右半边)
+                    # 调整索引以处理右半边
+                    kv_idx_4bit = kv_idx - seq_len // 2
+                    # q_idx_4bit = q_idx - seq_len // 2
+                    # 8bit window mask for 4bit part: 在8bit window外面的token
+                    bit8_window_mask_4bit = kv_idx_4bit <= q_idx - bit8_window_size
+                    # 4bit window mask: 在4bit window里面的token
+                    bit4_window_mask = kv_idx_4bit > q_idx - bit8_window_size - bit4_window_size
+                    bit4_no_sink_mask = kv_idx_4bit >= sink_window_size
+                    # 组合4bit部分的mask
+                    int4_mask = bit4_no_sink_mask & bit8_window_mask_4bit & bit4_window_mask
                     
-                    final_mask = fp8_mask | int4_mask
-                    acc_s[i, j] = T.if_then_else(final_mask, 0, -T.infinity(acc_s.dtype))
+                    # 3. 判断当前处理的是8bit还是4bit部分
+                    is_bit8_part = kv_idx < seq_len // 2  # 前半部分是8bit
+                    # is_valid_q_part = q_idx < seq_len // 2
+                    # 4. 组合最终的mask
+                    final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
+                    # final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
+                    # final_mask = fp8_mask |  int4_mask
+                    
+                    # acc_s[i, j] = T.if_then_else(final_mask, 0, -T.infinity(acc_s.dtype))
+                    acc_s[i, j] = T.if_then_else(final_mask, 0, -1e6)
             else:
                 T.clear(acc_s)
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -134,8 +151,8 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size, bit4_window_
             # To do causal softmax, we need to set the scores_max to 0 if it is -inf
             # This process is called Check_inf in FlashAttention3 code, and it only need to be done
             # in the first ceil_div(kBlockM, kBlockN) steps.
-            # for i in T.Parallel(block_M):
-            #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+            for i in T.Parallel(block_M):
+                scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
             for i in T.Parallel(block_M):
                 scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
             for i, j in T.Parallel(block_M, block_N):
@@ -184,11 +201,13 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size, bit4_window_
                 T.fill(scores_max, -T.infinity(accum_dtype))
 
                 loop_range = (
-                    T.min(T.ceildiv(2 * seq_len, block_N), T.ceildiv(
-                        (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(2 * seq_len, block_N))
+                    T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
+                        (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
+                    # if bx == 1:
+                    # T.print(acc_s, msg="acc_s")
                     Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                             scores_sum, logsum)
                     Rescale(acc_o, scores_scale)
@@ -218,7 +237,32 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size, bit4_window_
             return kernel_func(block_M, block_N, num_stages, threads)
 
         return kernel
- 
+
+
+def ref_program(Q, K, V, is_causal, groups=1):
+    # Q: [B, T, HQ, D]
+    # K: [B, T, HK, D]
+    # V: [B, T, HV, D]
+    # HQ = HKV * groups
+    assert Q.size(2) == K.size(
+        2) * groups, f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}"
+    assert Q.size(2) == V.size(
+        2) * groups, f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}"
+
+    dim = Q.size(-1)
+    K = K.repeat_interleave(groups, dim=2)
+    V = V.repeat_interleave(groups, dim=2)
+    scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
+    scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
+    if is_causal:
+        seq_len = Q.size(1)
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
+        mask = mask.unsqueeze(0).unsqueeze(0)
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+    attention_weights = F.softmax(scores, dim=-1)
+    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
+    return output
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -229,19 +273,76 @@ if __name__ == "__main__":
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
     parser.add_argument('--groups', type=int, default=7, help='groups')
+    parser.add_argument('--bit8_window_size', type=int, default=128, help='window size for 8bit computation')
+    parser.add_argument('--bit4_window_size', type=int, default=64, help='window size for 4bit computation')
+    parser.add_argument('--test_small', action='store_true', help='run small test case')
     args = parser.parse_args()
-    batch, heads, seq_len, dim, is_causal, groups = args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups
-    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
-    total_flops = 2 * flops_per_matmul
-    if is_causal:
-        total_flops *= 0.5
 
-    if (not args.tune):
-        program = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune, groups=groups)(
-                block_M=128, block_N=128, num_stages=2, threads=128)
+    if args.test_small:
+        # Small test case to verify mixed-bit attention
+        batch, heads, seq_len, dim = 1, 1, 16, 16 # 使用更小的维度便于观察
+        is_causal = True
+        groups = 1
+        bit8_window_size = 3  # 使用更小的window size便于观察效果
+        bit4_window_size = 2  # 4bit window比8bit window小
+        sink_window_size = 2
+        program = sqattn(
+            batch, heads, seq_len, dim, is_causal=True, 
+            bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, 
+            sink_window_size=sink_window_size,
+            tune=False, groups=groups)(
+                block_M=16, block_N=16, num_stages=2, threads=32)
+        
         kernel = tilelang.compile(program, out_idx=[3])
-        q = torch.randn(14, 2048, 28, 128, device="cuda", dtype=torch.float16)
-        k = torch.randn(14, 2048, 4, 128, device="cuda", dtype=torch.float16)
-        v = torch.randn(14, 2048, 4, 128, device="cuda", dtype=torch.float16)
-        kernel(q,k,v)
+        
+        # 创建简单的输入张量，使用不同的值便于观察
+        q = torch.ones(batch, seq_len, heads, dim, device="cuda", dtype=torch.float16)
+        k = torch.ones(batch, seq_len, heads//groups, dim, device="cuda", dtype=torch.float16)
+        v = torch.ones(batch, seq_len, heads//groups, dim, device="cuda", dtype=torch.float16)
+        
+        # 给输入添加一些变化，便于观察
+        for i in range(seq_len // 2):  # 只处理一半长度，因为seq_len已经是2倍
+            # 8bit部分
+            q[0, i, 0, :] = i + 1
+            k[0, i, 0, :] = i + 1
+            v[0, i, 0, :] = i + 1
+            # 4bit部分
+            q[0, i + seq_len//2, 0, :] = i + 1
+            k[0, i + seq_len//2, 0, :] = i + 1
+            v[0, i + seq_len//2, 0, :] = i + 1
+        
+        # 运行kernel
+        output = kernel(q, k, v)
+        
+        print("Test case parameters:")
+        print(f"Sequence length: {seq_len} (already doubled)")
+        print(f"8bit window size: {bit8_window_size}")
+        print(f"4bit window size: {bit4_window_size}")
+        print(f"Input shapes - Q: {q.shape}, K: {k.shape}, V: {v.shape}")
+        print("\nInput values:")
+        print("Q[0, :, 0, 0] (8bit part):", q[0, :seq_len//2, 0, 0].cpu().numpy())
+        print("Q[0, :, 0, 0] (4bit part):", q[0, seq_len//2:, 0, 0].cpu().numpy())
+        print("K[0, :, 0, 0] (8bit part):", k[0, :seq_len//2, 0, 0].cpu().numpy())
+        print("K[0, :, 0, 0] (4bit part):", k[0, seq_len//2:, 0, 0].cpu().numpy())
+        print("\nOutput values:")
+        print("Output[0, :, 0, 0]:", output[0, :, 0, 0].cpu().numpy())
+        
+    else:
+        batch, heads, seq_len, dim, is_causal, groups = args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups
+        flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
+        total_flops = 2 * flops_per_matmul
+        if is_causal:
+            total_flops *= 0.5
+
+        if (not args.tune):
+            program = sqattn(
+                batch, heads, seq_len, dim, is_causal=True, 
+                bit8_window_size=args.bit8_window_size, bit4_window_size=args.bit4_window_size,
+                tune=args.tune, groups=groups)(
+                    block_M=128, block_N=128, num_stages=2, threads=128)
+            ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
+            kernel = tilelang.compile(program, out_idx=[3])
+            q = torch.randn(14, 4096, 28, 128, device="cuda", dtype=torch.float16)
+            k = torch.randn(14, 4096, 4, 128, device="cuda", dtype=torch.float16)
+            v = torch.randn(14, 4096, 4, 128, device="cuda", dtype=torch.float16)
+            kernel(q,k,v)

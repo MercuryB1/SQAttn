@@ -248,7 +248,7 @@ if __name__ == "__main__":
 
     if (not args.tune):
         program = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune, groups=groups)(
+            batch, heads, seq_len, dim, is_causal=True, tune=args.tune, groups=groups)(
                 block_M=128, block_N=128, num_stages=2, threads=128)
         ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
         kernel = tilelang.compile(program, out_idx=[3])
