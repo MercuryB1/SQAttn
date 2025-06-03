@@ -5,9 +5,12 @@ from sparse_quant_attn.compression.sq_attn import sparsequantattn_prefill, calcu
 from loguru import logger
 from sparse_quant_attn.compression.kernel import flashattn
 from sparse_quant_attn.compression.kernel_sqattn import sqattn
-from sparse_quant_attn.compression.fake_quant import quantize_activation_per_token_absmax
+from sparse_quant_attn.compression.fake_quant import quantize_activation_per_token_absmax, pseudo_quantize_tensor
 import tilelang
 import tilelang.language as T
+from torch.nn.functional import scaled_dot_product_attention
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
+import copy
 
 
 def int4_quant(x):
@@ -44,7 +47,7 @@ def fp8_quant(x):
 def replace_flashattn_kernel_for_block(module: nn.Module, input_features: dict, blockidx: int, bit8_window_size=0, bit4_window_size=0, sink_window_size=0, args=None):
     if isinstance(module, Qwen2DecoderLayer):
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
-        
+        # import pdb; pdb.set_trace()
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = delayed_kernel_wrapper(blockidx, bit8_window_size, bit4_window_size, sink_window_size, args)
         module.self_attn.config._attn_implementation = impl_name
@@ -63,6 +66,18 @@ def replace_attn_for_block(module: nn.Module, input_features: dict, blockidx: in
         impl_name = f"sparsequantattn_{blockidx}"
         # 替换attention函数
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
+        module.self_attn.config._attn_implementation = impl_name
+
+
+@torch.no_grad()
+def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_size=0, bit4_window_size=0, sink_window_size=0):
+    if isinstance(module, Qwen2DecoderLayer):
+        from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
+        attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, sink_window_size=sink_window_size)
+        impl_name = f"sparsequantattn_{blockidx}"
+        ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
+        module.self_attn.config = copy.deepcopy(module.self_attn.config)
+        # module.self_attn.config._attn_implementation = impl_name
         module.self_attn.config._attn_implementation = impl_name
 
 
@@ -110,24 +125,41 @@ def delayed_kernel_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, si
         v = v.transpose(1, 2)
 
         if args.quant:
+            # 对q, k, v进行裁剪，绝对值最大不超过1000
+            q = torch.clamp(q, min=-1000, max=1000)
+            k = torch.clamp(k, min=-1000, max=1000)
+            v = torch.clamp(v, min=-1000, max=1000)
+            # 消除nan和正负inf
+            q = torch.nan_to_num(q, nan=0.0, posinf=1000.0, neginf=-1000.0)
+            k = torch.nan_to_num(k, nan=0.0, posinf=1000.0, neginf=-1000.0)
+            v = torch.nan_to_num(v, nan=0.0, posinf=1000.0, neginf=-1000.0)
             # TODO quantize q, k, v
             # q_int8 = quantize_activation_per_token_absmax(q, a_bits=8)
-            q_int8 = fp8_quant(q).to(torch.float16)
+            # q_int8 = fp8_quant(q).to(torch.float16)
+            q_int8, _, _ = pseudo_quantize_tensor(q, group_size=1, zero_point=True, bit_width=8)
             km = k.mean(dim=1, keepdim=True)
             k = k - km
             # k_int8 = quantize_activation_per_token_absmax(k, a_bits=8)
             # v_int8 = quantize_activation_per_token_absmax(v, a_bits=8)
             # k_int4 = quantize_activation_per_token_absmax(k, a_bits=4)
             # v_int4 = quantize_activation_per_token_absmax(v, a_bits=4)
-            k_int8 = fp8_quant(k).to(torch.float16)
-            v_int8 = fp8_quant(v).to(torch.float16) 
-            k_int4 = int4_quant(k).to(torch.float16)
-            v_int4 = int4_quant(v).to(torch.float16)
+            # k_int8 = fp8_quant(k).to(torch.float16)
+            # v_int8 = fp8_quant(v).to(torch.float16) 
+            # k_int4 = int4_quant(k).to(torch.float16)
+            # v_int4 = int4_quant(v).to(torch.float16)
+            k_int8, _, _ = pseudo_quantize_tensor(k, group_size=1, zero_point=True, bit_width=8)
+            v_int8, _, _ = pseudo_quantize_tensor(v, group_size=1, zero_point=True, bit_width=8)
+            k_int4, _, _ = pseudo_quantize_tensor(k, group_size=1, zero_point=True, bit_width=4)
+            v_int4, _, _ = pseudo_quantize_tensor(v, group_size=1, zero_point=True, bit_width=4)
             # import pdb; pdb.set_trace()
             q_int8_int8 = torch.cat([q_int8, q_int8], dim=1)
             k_int8_int4 = torch.cat([k_int8, k_int4], dim=1)
             v_int8_int4 = torch.cat([v_int8, v_int4], dim=1)
 
+            # q_int8_int8 = torch.cat([q, q], dim=1)
+            # k_int8_int4 = torch.cat([k, k], dim=1)
+            # v_int8_int4 = torch.cat([v, v], dim=1)
+            
 
             B, S, H, D = q_int8_int8.shape
             # print(f"[Compile Kernel] Layer {layer_idx}: B={B}, H={H}, S={S}, D={D}")
@@ -161,7 +193,9 @@ def delayed_kernel_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, si
                 kernel_holder["compiled"] = tilelang.compile(program, out_idx=[3])
                 # 调用已编译 kernel
                 attn_output = kernel_holder["compiled"](q_int8_int8, k_int8_int4, v_int8_int4)[:, :S//2, :, :]
-                import pdb; pdb.set_trace()
+                
+                
+                # import pdb; pdb.set_trace()
             return kernel_holder["compiled"](q_int8_int8, k_int8_int4, v_int8_int4)[:, :S//2, :, :], None
         
         else:
@@ -193,4 +227,70 @@ def delayed_kernel_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, si
 
             
 
+    return attention_fn
+
+
+
+
+def delayed_sdpa_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, sink_window_size=0, args=None):
+    def construct_mix_bit_mask(seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
+        """
+        返回 shape = (L, L) 的 mask，True表示可以attend，False表示mask掉。
+        """
+        q_idx = torch.arange(seq_len, device=device).unsqueeze(1)  # (L, 1)
+        kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, L)
+
+        # --- FP8 左半边 ---
+        causal_mask = kv_idx <= q_idx
+        bit8_window_mask = kv_idx > (q_idx - bit8_window_size)
+        sink_mask = kv_idx < sink_window_size
+        fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
+
+        # --- INT4 右半边 ---
+        kv_idx_4bit = kv_idx - seq_len // 2
+
+        bit8_window_mask_4bit = kv_idx_4bit <= (q_idx - bit8_window_size)
+        bit4_window_mask = kv_idx_4bit > (q_idx - bit8_window_size - bit4_window_size)
+        bit4_no_sink_mask = kv_idx_4bit >= sink_window_size
+        int4_mask = bit4_no_sink_mask & bit8_window_mask_4bit & bit4_window_mask
+
+        # --- 组合 ---
+        is_bit8_part = kv_idx < seq_len // 2
+        is_valid_q_part = q_idx < seq_len // 2
+        final_mask = is_valid_q_part & ((is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask))
+
+        return final_mask  # shape = (L, L)，dtype = bool
+
+    def attention_fn(
+        module, q, k, v, attn_mask,
+        dropout=0.0, scaling=1.0, sliding_window=None, **kwargs
+    ):  
+        if args.quant:
+            seqlen, dim = q.shape[2], q.shape[3]
+            km = k.mean(dim=2, keepdim=True)
+            k = k - km
+            # per token quantization
+            q_int8, _, _ = pseudo_quantize_tensor(q, group_size=dim, zero_point=True, bit_width=8)
+            k_int8, _, _ = pseudo_quantize_tensor(k, group_size=dim, zero_point=True, bit_width=8)
+            v_int8, _, _ = pseudo_quantize_tensor(v, group_size=dim, zero_point=True, bit_width=8)
+            k_int4, _, _ = pseudo_quantize_tensor(k, group_size=dim, zero_point=True, bit_width=4)
+            v_int4, _, _ = pseudo_quantize_tensor(v, group_size=dim, zero_point=True, bit_width=4)
+            q_int8_int8 = torch.cat([q_int8, q_int8], dim=2)
+            k_int8_int4 = torch.cat([k_int8, k_int4], dim=2)
+            v_int8_int4 = torch.cat([v_int8, v_int4], dim=2)
+            
+            mask = construct_mix_bit_mask(seq_len=seqlen*2,
+                                bit8_window_size=bit8_window_size,
+                                bit4_window_size=bit4_window_size,
+                                sink_window_size=sink_window_size)
+            attn_output, attn_weights = sdpa_attention_forward(
+                    module, q_int8_int8, k_int8_int4, v_int8_int4, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
+                )
+            # import pdb; pdb.set_trace()
+            return attn_output[:, :seqlen, :, :], attn_weights
+        else:
+            return sdpa_attention_forward(
+                    module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
+                )
+        
     return attention_fn

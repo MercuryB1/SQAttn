@@ -110,14 +110,12 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size=128, bit4_win
                     
                     # 3. 判断当前处理的是8bit还是4bit部分
                     is_bit8_part = kv_idx < seq_len // 2  # 前半部分是8bit
-                    # is_valid_q_part = q_idx < seq_len // 2
+                    is_valid_q_part = q_idx < seq_len // 2
                     # 4. 组合最终的mask
-                    final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
-                    # final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
+                    final_mask = is_valid_q_part & ((is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask))
                     # final_mask = fp8_mask |  int4_mask
                     
-                    # acc_s[i, j] = T.if_then_else(final_mask, 0, -T.infinity(acc_s.dtype))
-                    acc_s[i, j] = T.if_then_else(final_mask, 0, -1e6)
+                    acc_s[i, j] = T.if_then_else(final_mask, 0, -T.infinity(acc_s.dtype))
             else:
                 T.clear(acc_s)
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -151,8 +149,8 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size=128, bit4_win
             # To do causal softmax, we need to set the scores_max to 0 if it is -inf
             # This process is called Check_inf in FlashAttention3 code, and it only need to be done
             # in the first ceil_div(kBlockM, kBlockN) steps.
-            for i in T.Parallel(block_M):
-                scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+            # for i in T.Parallel(block_M):
+            #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
             for i in T.Parallel(block_M):
                 scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
             for i, j in T.Parallel(block_M, block_N):
@@ -207,7 +205,7 @@ def sqattn(batch, heads, seq_len, dim, is_causal, bit8_window_size=128, bit4_win
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                     # if bx == 1:
-                    # T.print(acc_s, msg="acc_s")
+                    T.print(acc_s, msg="acc_s")
                     Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                             scores_sum, logsum)
                     Rescale(acc_o, scores_scale)
@@ -284,8 +282,8 @@ if __name__ == "__main__":
         is_causal = True
         groups = 1
         bit8_window_size = 3  # 使用更小的window size便于观察效果
-        bit4_window_size = 2  # 4bit window比8bit window小
-        sink_window_size = 2
+        bit4_window_size = 1  # 4bit window比8bit window小
+        sink_window_size = 1
         program = sqattn(
             batch, heads, seq_len, dim, is_causal=True, 
             bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, 
@@ -301,15 +299,15 @@ if __name__ == "__main__":
         v = torch.ones(batch, seq_len, heads//groups, dim, device="cuda", dtype=torch.float16)
         
         # 给输入添加一些变化，便于观察
-        for i in range(seq_len // 2):  # 只处理一半长度，因为seq_len已经是2倍
-            # 8bit部分
-            q[0, i, 0, :] = i + 1
-            k[0, i, 0, :] = i + 1
-            v[0, i, 0, :] = i + 1
-            # 4bit部分
-            q[0, i + seq_len//2, 0, :] = i + 1
-            k[0, i + seq_len//2, 0, :] = i + 1
-            v[0, i + seq_len//2, 0, :] = i + 1
+        # for i in range(seq_len // 2):  # 只处理一半长度，因为seq_len已经是2倍
+        #     # 8bit部分
+        #     q[0, i, 0, :] = i + 1
+        #     k[0, i, 0, :] = i + 1
+        #     v[0, i, 0, :] = i + 1
+        #     # 4bit部分
+        #     q[0, i + seq_len//2, 0, :] = i + 1
+        #     k[0, i + seq_len//2, 0, :] = i + 1
+        #     v[0, i + seq_len//2, 0, :] = i + 1
         
         # 运行kernel
         output = kernel(q, k, v)

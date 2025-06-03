@@ -70,7 +70,7 @@ def main():
     #     device = model.hf_device_map["lm_head"]
     logger.info(f"use device: {device}")
     
-    compress_model(model, tokenizer, device, args)  
+    avg_bits = compress_model(model, tokenizer, device, args)  
     
     logger.info("*"*30)
     

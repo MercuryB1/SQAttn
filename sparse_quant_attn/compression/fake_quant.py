@@ -27,12 +27,12 @@ def quantize_weight_per_tensor_absmax(w, w_bits=8):
 @torch.no_grad()
 def quantize_activation_per_token_absmax(x, a_bits=8):
     x_shape = x.shape
-    x = x.view(-1, x_shape[-1])  # 正确 reshape
-    scales = x.abs().max(dim=-1, keepdim=True)[0]  # (num_tokens, 1)
+    x.view(-1, x_shape[-1])
+    scales = x.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (a_bits - 1) - 1
-    scales = scales.clamp(min=1e-5) / q_max
+    scales.clamp_(min=1e-5).div_(q_max)
     x.div_(scales).round_().mul_(scales)
-    return x.view(*x_shape)
+    return x
 
 
 @torch.no_grad()
@@ -253,3 +253,41 @@ def quantize_layer(module, weight_quant='per_channel', w_bits=8, act_quant='per_
             m.up_proj = QuantLinear.from_float(
                 m.up_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits,)
     return module
+
+@torch.no_grad()
+def pseudo_quantize_tensor(w: torch.Tensor, group_size=0, zero_point=False, bit_width=8):
+        org_w_shape = w.shape
+        if group_size > 0:
+            assert org_w_shape[-1] % group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({group_size})!"
+            w = w.reshape(-1, group_size)
+        assert w.dim() == 2
+        assert torch.isnan(w).sum() == 0
+
+        # zero point quantization
+        if zero_point:
+            max_val = w.amax(dim=1, keepdim=True)
+            min_val = w.amin(dim=1, keepdim=True)
+            max_int = 2**bit_width - 1
+            min_int = 0
+            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+            w = (
+                torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
+            ) * scales
+            zeros = zeros.view(org_w_shape[0], -1)
+        else:
+            max_val = w.abs().amax(dim=1, keepdim=True)
+            max_val = max_val.clamp(min=1e-5)
+            max_int = 2 ** (bit_width - 1) - 1
+            min_int = -(2 ** (bit_width - 1))
+            scales = max_val / max_int
+            zeros = None
+            w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
+
+        assert torch.isnan(scales).sum() == 0
+        assert torch.isnan(w).sum() == 0
+
+        scales = scales.view(org_w_shape[0], -1)
+        w = w.reshape(org_w_shape)
+
+        return w, scales, zeros

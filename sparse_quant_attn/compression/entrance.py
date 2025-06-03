@@ -5,10 +5,12 @@ import torch.nn.functional as F
 from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed, get_named_linears
 from sparse_quant_attn.compression.calibration import get_calib_dataset
-from sparse_quant_attn.compression.attn_fake_quant import replace_attn_for_block, replace_flashattn_kernel_for_block
+from sparse_quant_attn.compression.attn_fake_quant import replace_attn_for_block, replace_flashattn_kernel_for_block, replace_sdpa_for_block
 import gc
 from tqdm import tqdm
 import functools
+import numpy as np
+
 
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
@@ -61,9 +63,7 @@ def compress_model(model, tokenizer, device, args):
     
     gc.collect()
     torch.cuda.empty_cache()
-    # torch.cuda.memory._record_memory_history(
-    #    max_entries=100000
-    # )
+    bits_alloc = defaultdict(list)
 
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
@@ -96,79 +96,73 @@ def compress_model(model, tokenizer, device, args):
         # input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
         
         #TODO: quantize attn
-        # replace_flashattn_kernel_for_block(layer, input_feat, i, args=args)
-
-        # bit8_window_size, bit4_window_size = grid_search_block_window_size(layer, i, inps, layer_kwargs, args)
-        replace_flashattn_kernel_for_block(layer, inps, i, args=args, bit8_window_size=1024, bit4_window_size=256, sink_window_size=16)
-
+        # logger.info(f"{layer.self_attn.config._attn_implementation}")
+        # if not (i == 0 or i == len(layers) - 1): 
+        # replace_sdpa_for_block(layer, i, args)
+        ori_outputs = layer(inps, **layer_kwargs)[0]
+        bit8_window_size, bit4_window_size = grid_search_block_window_size(layer, i, inps, ori_outputs, layer_kwargs, args)
+        bits_alloc[i] = [bit8_window_size, bit4_window_size]
+        replace_sdpa_for_block(layer, i, args, bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, sink_window_size=32)
+        # replace_sdpa_for_block(layer, i, args, bit8_window_size=0, bit4_window_size=0, sink_window_size=0)
         # update output after compression
         inps = layer(inps, **layer_kwargs)[0]
         
         # del input_feat
         layer.cpu()
         torch.cuda.empty_cache()
+    return compute_avg_bits(bits_alloc)
 
-    # try:
-    #    torch.cuda.memory._dump_snapshot(f"cuda_memory_snapshot.pickle")
-    # except Exception as e:
-    #    logger.error(f"Failed to capture memory snapshot {e}")
-    
-    # torch.cuda.memory._record_memory_history(enabled=None)
-
-
-def cosine_similarity(a, b):
-    return F.cosine_similarity(a, b, dim=-1).mean().item()
 
 @torch.no_grad()
-def grid_search_block_window_size(layer, layer_idx, inps, layer_kwargs, args):
+def grid_search_block_window_size(layer, layer_idx, inps, ori_outputs, layer_kwargs, args):
 
     logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
+    bit8_window_candidate_sizes = list(range(16, args.seqlen + 1, 16))
+    bit8_thres_cos = 0.9999
+    bit8_thres_rmse = 0.05
+    bit4_thres_cos = 0.9999
+    bit4_thres_rmse = 0.01
 
-    # bit8_window_candidate_sizes = list(range(16, args.seqlen + 1, 16))
-    bit8_window_candidate_sizes = [256, 512, 1024, 2048]
-    bit4_window_candidate_sizes = [128, 256]
-    # bit4_window_candidate_sizes = list(reversed(bit8_window_candidate_sizes))
-    # window_candidate_sizes = list(range(16, args.seqlen + 1, 16))   
-
-    bit8_thres = 0.99
-    bit4_thres = 0.95
-
-    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, bit8_window_candidate_sizes, bit8_thres, layer_kwargs, args)
-
-    # bit4_window_candidate_sizes = list(reversed(bit8_window_candidate_sizes[:bit8_window_size//16]))
-    # import pdb; pdb.set_trace()
-    bit4_window_size = search_bit4_window_size(layer, layer_idx, inps, bit8_window_size, bit4_window_candidate_sizes, bit4_thres, layer_kwargs, args)
-
+    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
+    bit4_window_candidate_sizes = bit8_window_candidate_sizes[:(args.seqlen-bit8_window_size)//16]
+    bit4_window_size = search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, bit4_thres_cos, bit4_thres_rmse, layer_kwargs, args)
     logger.info(f"Best bit8 window size: {bit8_window_size}, best bit4 window size: {bit4_window_size}")
 
     return bit8_window_size, bit4_window_size
 
     
-
+def compute_cos_rmse(a: torch.Tensor, b: torch.Tensor):
+    a = a.view(-1).float()
+    b = b.view(-1).float()
+    cos_sim = F.cosine_similarity(a, b, dim=0).item()
+    rmse = torch.sqrt(F.mse_loss(a, b)).item()
+    return cos_sim, rmse
 
 @torch.no_grad()
-def search_bit8_window_size(layer, layer_idx, inps, bit8_window_candidate_sizes, thres, layer_kwargs, args):
-    ori_outputs = layer(inps, **layer_kwargs)[0]
-    # import pdb; pdb.set_trace()
+def search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
     for w in bit8_window_candidate_sizes:
-        replace_flashattn_kernel_for_block(layer, inps, layer_idx, args=args, bit8_window_size=w, bit4_window_size=0, sink_window_size=16)
-
+        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=w, bit4_window_size=0, sink_window_size=32)
+        # replace
         quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim = cosine_similarity(ori_outputs, quant_outputs)
-        logger.info(f"Bit8 window size: {w}, similarity: {sim}, quant_outputs: {quant_outputs}")
-        if sim >= thres:
+        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
+        logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
+        if sim >= thres_cos and rmse <= thres_rmse:
             return w
     return bit8_window_candidate_sizes[-1]
 
 
-
 @torch.no_grad()
-def search_bit4_window_size(layer, layer_idx, inps, bit8_window_size, bit4_window_candidate_sizes, thres, layer_kwargs, args):
-    ori_outputs = layer(inps, **layer_kwargs)[0]
+def search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
     for w in bit4_window_candidate_sizes:
-        replace_flashattn_kernel_for_block(layer, inps, layer_idx, args=args, bit8_window_size=bit8_window_size, bit4_window_size=w, sink_window_size=16)
+        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=bit8_window_size, bit4_window_size=w, sink_window_size=32)
         quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim = cosine_similarity(ori_outputs, quant_outputs)
-        if sim >= thres:
+        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
+        logger.info(f"Bit4 window size: {w}, similarity: {sim}, rmse: {rmse}")
+        if sim >= thres_cos and rmse <= thres_rmse:
             return w
     return bit4_window_candidate_sizes[-1]
+
+
+def compute_avg_bits(bits_alloc):
+    avg_bits = sum(bits_alloc.values()) / len(bits_alloc)
+    return avg_bits
