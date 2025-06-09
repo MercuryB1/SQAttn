@@ -42,7 +42,7 @@ def main():
     parser.add_argument("--model", type=str, help="model name or model path")
     parser.add_argument("--save_dir", default=None, type=str, help="direction for saving fake quantization model")
     parser.add_argument("--calib_dataset",type=str,default="pileval",
-        choices=["wikitext2", "ptb", "c4", "mix","pileval"],
+        choices=["wikitext2", "ptb", "c4", "mix","pileval", "gsm8k"],
         help="Where to extract calibration data from.",
     )
     parser.add_argument("--nsamples", type=int, default=128, help="Number of calibration data samples.")
@@ -50,13 +50,18 @@ def main():
     parser.add_argument("--seqlen", type=int, default=2048, help="seqlen.")
     parser.add_argument("--seed", type=int, default=2, help="Seed for sampling the calibration data.")
     parser.add_argument("--eval_ppl", action="store_true", help="eval wikitext2 ppl")
+    parser.add_argument("--eval_gsm8k", action="store_true", help="eval gsm8k")
     parser.add_argument("--multigpu", action="store_true", help="use multigpu for eval")
     parser.add_argument("--tasks", default=None, type=str)
     parser.add_argument("--num_fewshot", type=int, default=0)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--dynamic_shape", action="store_true", help="use dynamic shape for flashattn")
     parser.add_argument("--quant", action="store_true", help="use causal mask for flashattn")
-
+    parser.add_argument("--qk_qtype", type=str, default="int", choices=["int", "e4m3", "e5m2"], help="quantization type for qk")
+    parser.add_argument("--v_qtype", type=str, default="int", choices=["int", "e4m3", "e5m2"], help="quantization type for v")
+    parser.add_argument("--bit8_thres_cos", type=float, default=0.9999, help="threshold for cosine similarity for bit8")
+    parser.add_argument("--bit8_thres_rmse", type=float, default=0.01, help="threshold for rmse for bit8")
+    parser.add_argument("--sample_output_file", type=str, default="gsm8k_res.jsonl", help="file for saving sample output")
     
     args = parser.parse_args()
     seed_everything(args.seed)
@@ -71,7 +76,7 @@ def main():
     logger.info(f"use device: {device}")
     
     avg_bits = compress_model(model, tokenizer, device, args)  
-    
+    logger.info(f"avg bits: {avg_bits}")
     logger.info("*"*30)
     
     model.cuda()

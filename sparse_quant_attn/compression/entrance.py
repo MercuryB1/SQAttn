@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed, get_named_linears
 from sparse_quant_attn.compression.calibration import get_calib_dataset
-from sparse_quant_attn.compression.attn_fake_quant import replace_attn_for_block, replace_flashattn_kernel_for_block, replace_sdpa_for_block
+from sparse_quant_attn.compression.attn_replacer import replace_attn_for_block, replace_flashattn_kernel_for_block, replace_sdpa_for_block
 import gc
 from tqdm import tqdm
 import functools
@@ -17,17 +17,15 @@ def compress_model(model, tokenizer, device, args):
     layers = get_blocks(model)
 
     logger.info(f"loading calibdation data: {args.calib_dataset}")
-    samples = get_calib_dataset(
+    samples, padding_mask = get_calib_dataset(
         data=args.calib_dataset,
         tokenizer=tokenizer,
         n_samples=args.nsamples,
         seq_len=args.seqlen,
+        device=device
     )
-
-    samples = torch.cat(samples, dim=0)
-    samples = samples[0:1]
     logger.info("dataset loading complete")
-
+    max_window_size = samples.shape[1]
     inps = []
     layer_kwargs = {}
     layers[0] = layers[0].cuda()
@@ -99,10 +97,11 @@ def compress_model(model, tokenizer, device, args):
         # logger.info(f"{layer.self_attn.config._attn_implementation}")
         # if not (i == 0 or i == len(layers) - 1): 
         # replace_sdpa_for_block(layer, i, args)
-        ori_outputs = layer(inps, **layer_kwargs)[0]
-        bit8_window_size, bit4_window_size = grid_search_block_window_size(layer, i, inps, ori_outputs, layer_kwargs, args)
-        bits_alloc[i] = [bit8_window_size, bit4_window_size]
-        replace_sdpa_for_block(layer, i, args, bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, sink_window_size=32)
+        if i !=0 and i != len(layers) - 1:
+            ori_outputs = layer(inps, **layer_kwargs)[0]
+            bit8_window_size, bit4_window_size = grid_search_block_window_size_8bit_only(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
+            bits_alloc[i] = [bit8_window_size, bit4_window_size]
+            replace_sdpa_for_block(layer, i, args, bit8_window_size=bit8_window_size, bit4_window_size=0, sink_window_size=16)
         # replace_sdpa_for_block(layer, i, args, bit8_window_size=0, bit4_window_size=0, sink_window_size=0)
         # update output after compression
         inps = layer(inps, **layer_kwargs)[0]
@@ -110,8 +109,22 @@ def compress_model(model, tokenizer, device, args):
         # del input_feat
         layer.cpu()
         torch.cuda.empty_cache()
-    return compute_avg_bits(bits_alloc)
+    return compute_avg_bits(bits_alloc, max_window_size)
+    # return 0
 
+
+@torch.no_grad()
+def grid_search_block_window_size_8bit_only(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
+    logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
+    # bit8_window_candidate_sizes = list(range(128, args.seqlen + 1, 128))
+    # Evenly distribute candidate sizes up to max_window_size
+    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
+    if max_window_size not in bit8_window_candidate_sizes:
+        bit8_window_candidate_sizes.append(max_window_size)
+    bit8_thres_cos = args.bit8_thres_cos
+    bit8_thres_rmse = args.bit8_thres_rmse
+    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
+    return bit8_window_size, 0
 
 @torch.no_grad()
 def grid_search_block_window_size(layer, layer_idx, inps, ori_outputs, layer_kwargs, args):
@@ -163,6 +176,45 @@ def search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_siz
     return bit4_window_candidate_sizes[-1]
 
 
-def compute_avg_bits(bits_alloc):
-    avg_bits = sum(bits_alloc.values()) / len(bits_alloc)
+def construct_mix_bit_mask(seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
+    """
+    返回 shape = (L, L) 的 mask，True表示可以attend，False表示mask掉。
+    """
+    q_idx = torch.arange(seq_len, device=device).unsqueeze(1)  # (L, 1)
+    kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, L)
+
+    # --- FP8 左半边 ---
+    causal_mask = kv_idx <= q_idx
+    bit8_window_mask = kv_idx > (q_idx - bit8_window_size)
+    sink_mask = kv_idx < sink_window_size
+    fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
+
+    # --- INT4 右半边 ---
+    kv_idx_4bit = kv_idx - seq_len // 2
+
+    bit8_window_mask_4bit = kv_idx_4bit <= (q_idx - bit8_window_size)
+    bit4_window_mask = kv_idx_4bit > (q_idx - bit8_window_size - bit4_window_size)
+    bit4_no_sink_mask = kv_idx_4bit >= sink_window_size
+    int4_mask = bit4_no_sink_mask & bit8_window_mask_4bit & bit4_window_mask
+
+    # --- 组合 ---
+    is_bit8_part = kv_idx < seq_len // 2
+    is_valid_q_part = q_idx < seq_len // 2
+    final_mask = is_valid_q_part & ((is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask))
+    # final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
+
+    return final_mask  # shape = (L, L)，dtype = bool
+
+
+#TODO 增加int4的计算
+def compute_avg_bits(bits_alloc, max_window_size):
+    total_bits = 0
+    total_tokens = 0
+    # import pdb; pdb.set_trace()
+    for window_sizes in bits_alloc.values():
+        mask = construct_mix_bit_mask(max_window_size*2, window_sizes[0], window_sizes[1], 32)
+        mask = mask[:max_window_size, :max_window_size]
+        total_bits += torch.sum(mask.float()) * 8 # 8 bits per token
+        total_tokens += mask.numel()
+    avg_bits = total_bits / (total_tokens / 2)
     return avg_bits

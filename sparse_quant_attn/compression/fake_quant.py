@@ -46,214 +46,6 @@ def quantize_activation_per_tensor_absmax(x, a_bits=8):
     return x
 
 
-class QuantLinear(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        bias=True,
-        act_quant="per_token",
-        quantize_output=False,
-        a_bits=8,
-        ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        
-        self.register_buffer(
-            "weight",
-            torch.randn(
-                self.out_features,
-                self.in_features,
-                dtype=torch.float16,
-                requires_grad=False,
-            ),
-        )
-        
-        if bias:
-            self.register_buffer(
-                "bias",
-                torch.zeros(
-                    (1, self.out_features),
-                    dtype=torch.float16,
-                    requires_grad=False,
-                ),
-            )
-        else:
-            self.register_buffer("bias", None)
-        
-        if act_quant == 'per_token':
-            self.act_quant_name = "per_token"
-            self.a_bits = a_bits
-            self.act_quant = partial(quantize_activation_per_token_absmax, a_bits=self.a_bits)
-        elif act_quant == "per_tensor":
-            self.act_quant_name = "per_tensor"
-            self.a_bits = a_bits
-            self.act_quant = partial(quantize_activation_per_tensor_absmax, a_bits=self.a_bits)
-        else:
-            raise ValueError(f"Invalid act_quant: {act_quant}")
-        
-        if quantize_output:
-            self.output_quant_name = self.act_quant_name
-            self.output_quant = self.act_quant
-        else:
-            self.output_quant_name = None
-            self.output_quant = lambda x : x
-            
-
-    def to(self, *args, **kwargs):
-        super(QuantLinear, self).to(*args, **kwargs)
-        self.weight = self.weight.to(*args, **kwargs)
-        if self.bias is not None:
-            self.bias = self.bias.to(*args, **kwargs)
-        return self
-    
-    
-    @torch.no_grad()
-    def forward(self, x):
-        q_x = self.act_quant(x)
-        y = torch.functional.F.linear(q_x, self.weight, self.bias)
-        q_y = self.output_quant(y)
-        return q_y
-    
-    
-    @staticmethod
-    def from_float(
-        module, weight_quant="per_channel", w_bits=8, act_quant="per_token", a_bits=8, quantize_output=False, 
-    ):
-        assert isinstance(module, nn.Linear)
-        quant_module = QuantLinear(
-            module.in_features,
-            module.out_features,
-            module.bias is not None,
-            act_quant=act_quant,
-            quantize_output=quantize_output,
-            a_bits=a_bits
-        )
-        if weight_quant == "per_channel":
-            quant_module.w_bits = w_bits
-            quant_module.weight = quantize_weight_per_channel_absmax(
-                w=module.weight,
-                w_bits=w_bits,
-            )
-        elif weight_quant == "pre_tensor":
-            quant_module.w_bits = w_bits
-            quant_module.weight = quantize_weight_per_tensor_absmax(
-                w=module.weight,
-                w_bits=w_bits,
-            )
-        else:
-            raise ValueError(f"Invalid weight_quant: {weight_quant}")
-        quant_module.weight_quant_name = weight_quant
-        if module.bias is not None:
-            quant_module.bias = module.bias
-        return quant_module
-    
-    def __repr__(self):
-        return f"QuantLinear({self.in_features}, {self.out_features}, bias={self.bias is not None}, weight_quant={self.weight_quant_name}, weight_bits={self.w_bits}, act_quant={self.act_quant_name}, act_bits={self.a_bits}, output_quant={self.output_quant_name})"
-    
-    
-def quantize_llama_like(
-    model, weight_quant="per_channel", w_bits=8, act_quant="per_token", a_bits=8, quantize_bmm_input=False
-):
-    from transformers.models.llama.modeling_llama import (
-        LlamaAttention,
-        LlamaMLP
-    )
-    
-    from transformers.models.mistral.modeling_mistral import (
-        MistralAttention,
-        MistralMLP,
-    )
-    
-    for name, m in model.model.named_modules():
-        if isinstance(m, (LlamaMLP, )):
-            m.gate_proj = QuantLinear.from_float(
-                m.gate_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits
-            )
-            m.up_proj = QuantLinear.from_float(
-                m.up_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits
-            )
-            m.down_proj = QuantLinear.from_float(
-                m.down_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits
-            )
-        elif isinstance(m, (LlamaAttention, MistralAttention)):
-            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
-            m.q_proj = QuantLinear.from_float(
-                m.q_proj,
-                weight_quant=weight_quant,
-                w_bits=w_bits,
-                act_quant=act_quant,
-                a_bits=a_bits,
-                quantize_output=quantize_bmm_input,
-            )
-            m.k_proj = QuantLinear.from_float(
-                m.k_proj,
-                weight_quant=weight_quant,
-                w_bits=w_bits,
-                act_quant=act_quant,
-                a_bits=a_bits,
-                quantize_output=quantize_bmm_input,
-            )
-            m.v_proj = QuantLinear.from_float(
-                m.v_proj,
-                weight_quant=weight_quant,
-                w_bits=w_bits,
-                act_quant=act_quant,
-                a_bits=a_bits,
-                quantize_output=quantize_bmm_input,
-            )
-            m.o_proj = QuantLinear.from_float(
-                m.o_proj, 
-                weight_quant=weight_quant,
-                w_bits=w_bits,
-                act_quant=act_quant,
-                a_bits=a_bits,
-            )
-    return model
-    
-    
-def quantize_model(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False
-):
-    from transformers.models.opt.modeling_opt import OPTPreTrainedModel
-    from transformers.models.llama.modeling_llama import LlamaPreTrainedModel
-    from transformers.models.mistral.modeling_mistral import MistralPreTrainedModel
-    from transformers.models.mixtral.modeling_mixtral import MixtralPreTrainedModel
-    from transformers.models.falcon.modeling_falcon import FalconPreTrainedModel
-
-    if isinstance(model, (LlamaPreTrainedModel, MistralPreTrainedModel)):
-        return quantize_llama_like(
-            model,
-            weight_quant=weight_quant,
-            act_quant=act_quant,
-            quantize_bmm_input=quantize_bmm_input,
-        )
-    else:
-        raise ValueError(f"Unsupported model type: {type(model)}")
-    
-    
-@torch.no_grad()
-def quantize_layer(module, weight_quant='per_channel', w_bits=8, act_quant='per_token', a_bits=8, quantize_bmm_input=False):
-    for name, m in module.named_modules():
-        if isinstance(m, LlamaAttention):
-            m.q_proj = QuantLinear.from_float(
-                m.q_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits, quantize_output=quantize_bmm_input)
-            m.k_proj = QuantLinear.from_float(
-                m.k_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits, quantize_output=quantize_bmm_input)
-            m.v_proj = QuantLinear.from_float(
-                m.v_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits, quantize_output=quantize_bmm_input)
-            m.o_proj = QuantLinear.from_float(
-                m.o_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits,)
-        elif isinstance(m, LlamaMLP):
-            m.gate_proj = QuantLinear.from_float(
-                m.gate_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits,)
-            m.down_proj = QuantLinear.from_float(
-                m.down_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits,)
-            m.up_proj = QuantLinear.from_float(
-                m.up_proj, weight_quant=weight_quant, w_bits=w_bits, act_quant=act_quant, a_bits=a_bits,)
-    return module
-
 @torch.no_grad()
 def pseudo_quantize_tensor(w: torch.Tensor, group_size=0, zero_point=False, bit_width=8):
         org_w_shape = w.shape
@@ -291,3 +83,81 @@ def pseudo_quantize_tensor(w: torch.Tensor, group_size=0, zero_point=False, bit_
         w = w.reshape(org_w_shape)
 
         return w, scales, zeros
+
+@torch.no_grad()
+def pseudo_fp_quantize_tensor(tensor: torch.Tensor, group_size=0, zero_point=False, bit="e4m3"):
+    from qtorch.quant import float_quantize
+    if bit == "e4m3":
+        e_bits = 4
+        m_bits = 3
+        fp_dtype = torch.float8_e4m3fn
+    elif bit == "e5m2":
+        e_bits = 5
+        m_bits = 2
+        fp_dtype = torch.float8_e5m2
+    finfo = torch.finfo(fp_dtype)
+    qmin, qmax = finfo.min, finfo.max
+
+    qmax = torch.tensor(qmax)
+    qmin = torch.tensor(qmin)
+
+    def quant(tensor, scales, zeros, qmax, qmin):
+        scaled_tensor = tensor / scales + zeros
+        scaled_tensor = torch.clip(scaled_tensor, qmin.cuda(), qmax.cuda())
+        org_dtype = scaled_tensor.dtype
+        q_tensor = float_quantize(scaled_tensor.float(), e_bits, m_bits, rounding="nearest")
+        q_tensor.to(org_dtype)
+        return q_tensor
+
+    def dequant(tensor, scales, zeros):
+        tensor = (tensor - zeros) * scales
+        return tensor
+    
+    def quant_dequant(tensor, scales, zeros, qmax, qmin):
+        tensor = quant(tensor, scales, zeros, qmax, qmin)
+        tensor = dequant(tensor, scales, zeros)
+        return tensor
+    
+    def get_qparams(tensor_range, device, sym=False):
+        min_val, max_val = tensor_range[0], tensor_range[1]
+        qmin = qmin.to(device)
+        qmax = qmax.to(device)
+        if sym:
+            abs_max = torch.max(max_val.abs(), min_val.abs())
+            abs_max = abs_max.clamp(min=1e-5)
+            scales = abs_max / qmax
+            zeros = torch.tensor(0.0)
+        else:
+            scales = (max_val - min_val).clamp(min=1e-5) / (qmax - qmin)
+            zeros = (qmin - torch.round(min_val / scales)).clamp(qmin, qmax)
+        return scales, zeros, qmax, qmin
+
+    def reshape_tensor(tensor, granularity="per_group", group_size=0, allow_padding=False):
+        if granularity == "per_group":
+            t = tensor.reshape(-1, group_size)
+        else:
+            t = tensor
+        return t
+
+    def get_tensor_qparams(tensor):
+        tensor = reshape_tensor(tensor)
+        tensor_range = get_tensor_range(tensor)
+        scales, zeros, qmax, qmin = get_qparams(tensor_range, tensor.device)
+        return tensor, scales, zeros, qmax, qmin
+    
+    def restore_tensor(tensor, shape):
+        if tensor.shape == shape:
+            t = tensor
+        else:
+            t = tensor.reshape(shape)
+        return t
+    
+    def fake_quant_tensor(tensor):
+        org_shape = tensor.shape
+        org_dtype = tensor.dtype
+        tensor, scales, zeros, qmax, qmin = get_tensor_qparams(tensor)
+        tensor = quant_dequant(tensor, scales, zeros, qmax, qmin)
+        tensor = restore_tensor(tensor, org_shape).to(org_dtype)
+        return tensor
+    
+    return fake_quant_tensor(tensor)

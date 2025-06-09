@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=3
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$jsq:$PYTHONPATH
 
@@ -8,9 +8,14 @@ export PYTHONPATH=$jsq:$PYTHONPATH
 task_name=test
 
 python ${sqattn}/main.py \
---model Qwen/Qwen2.5-7B \
+--model /mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2 \
+--calib_dataset gsm8k \
 --quant \
---eval_ppl \
+--qk_qtype int \
+--v_qtype e4m3 \
+--eval_gsm8k \
+--bit8_thres_cos 0.999 \
+--bit8_thres_rmse 0.03 \
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \

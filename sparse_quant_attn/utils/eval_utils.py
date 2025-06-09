@@ -5,6 +5,7 @@ from datasets import load_dataset
 from loguru import logger
 import numpy as np
 from sparse_quant_attn.utils.parellel_utils import map_layers_to_multi_gpus 
+from sparse_quant_attn.eval.evaluate_gsm8k import evaluate_gsm8k
 from sparse_quant_attn.utils.categories import subcategories, categories
 from lm_eval import evaluator
 import torch.nn.functional as F
@@ -768,6 +769,8 @@ def evaluate(model, tokenizer, args):
             lm.model.model.embed_tokens.to(input_device)
             lm.model.model.norm.to(output_device)
             lm.model.lm_head.to(output_device)
+    if args.eval_gsm8k:
+        evaluate_gsm8k(model, tokenizer, args)
     if args.eval_ppl:
         testenc = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         testenc = tokenizer("\n\n".join(testenc["text"]), return_tensors="pt")
