@@ -257,8 +257,8 @@ def evaluate_gsm8k(model, tokenizer, args):
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
     dataset = load_dataset("gsm8k", "main", download_config=config)
     
-    # test = dataset["test"].select(range(50))
-    test = dataset["test"]
+    test = dataset["test"].select(range(50))
+    # test = dataset["test"]
 
     # sample_output_file = "gsm8k_res.jsonl"
     sample_output_file = args.sample_output_file

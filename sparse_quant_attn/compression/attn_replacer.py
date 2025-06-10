@@ -71,15 +71,45 @@ def replace_attn_for_block(module: nn.Module, input_features: dict, blockidx: in
 
 
 @torch.no_grad()
-def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_size=0, bit4_window_size=0, sink_window_size=0):
+def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0):
     if isinstance(module, Qwen2DecoderLayer):
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
-        attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_size=bit8_window_size, bit4_window_size=bit4_window_size, sink_window_size=sink_window_size)
+        attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
         module.self_attn.config = copy.deepcopy(module.self_attn.config)
         # module.self_attn.config._attn_implementation = impl_name
         module.self_attn.config._attn_implementation = impl_name
+
+
+
+# @torch.no_grad()
+# def replace_sdpa_for_block_per_head(
+#     module: nn.Module,
+#     blockidx: int,
+#     args,
+#     bit8_window_sizes: list,  # [int] per-head
+#     bit4_window_sizes: list = None,  # [int] per-head
+#     sink_window_size: int = 0
+# ):
+#     if isinstance(module, Qwen2DecoderLayer):
+#         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
+
+#         # 将两个 list 都传进去 wrapper
+#         attn_fn = delayed_sdpa_wrapper_per_head(
+#             layer_idx=blockidx,
+#             args=args,
+#             bit8_window_sizes=bit8_window_sizes,
+#             bit4_window_sizes=bit4_window_sizes,
+#             sink_window_size=sink_window_size
+#         )
+
+#         impl_name = f"sparsequantattn_{blockidx}"
+#         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
+
+#         # 更新注意力配置为自定义实现
+#         module.self_attn.config = copy.deepcopy(module.self_attn.config)
+#         module.self_attn.config._attn_implementation = impl_name
 
 
 @torch.no_grad()
@@ -224,16 +254,70 @@ def delayed_kernel_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, si
 
             # 调用已编译 kernel
             return kernel_holder["compiled"](q, k, v), None
-
-
-            
-
     return attention_fn
 
 
+def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_window_size=0, args=None):
+    # Determine if we should use per-head mask based on input types
+    is_per_head = isinstance(bit8_window_sizes, list) or isinstance(bit4_window_sizes, list)
+    
+    if is_per_head:
+        # Get number of heads from the other list
+        if isinstance(bit8_window_sizes, list):
+            num_heads = len(bit8_window_sizes)
+        else:
+            num_heads = len(bit4_window_sizes)
+        
+        # Convert single values to lists for per-head case
+        if isinstance(bit8_window_sizes, int):
+            bit8_window_sizes = [bit8_window_sizes] * num_heads
+        if isinstance(bit4_window_sizes, int):
+            bit4_window_sizes = [bit4_window_sizes] * num_heads
+        if bit8_window_sizes is None:
+            bit8_window_sizes = [0] * num_heads
+        if bit4_window_sizes is None:
+            bit4_window_sizes = [0] * num_heads
+    else:
+        # For single value case, ensure we have single integers
+        if isinstance(bit8_window_sizes, list):
+            bit8_window_sizes = bit8_window_sizes[0] if bit8_window_sizes else 0
+        if isinstance(bit4_window_sizes, list):
+            bit4_window_sizes = bit4_window_sizes[0] if bit4_window_sizes else 0
+        bit8_window_sizes = bit8_window_sizes or 0
+        bit4_window_sizes = bit4_window_sizes or 0
 
+    def construct_mix_bit_mask_per_head(seq_len, bit8_window_sizes, bit4_window_sizes, sink_window_size, device='cuda'):
+        """
+        返回 shape = (num_heads, L, L) 的 bool mask，True表示可以attend。
+        """
+        num_heads = len(bit8_window_sizes)
+        q_idx = torch.arange(seq_len, device=device).unsqueeze(0).unsqueeze(2)  # (1, L, 1)
+        kv_idx = torch.arange(seq_len, device=device).unsqueeze(0).unsqueeze(1)  # (1, 1, L)
 
-def delayed_sdpa_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, sink_window_size=0, args=None):
+        q_idx = q_idx.expand(num_heads, seq_len, 1)
+        kv_idx = kv_idx.expand(num_heads, 1, seq_len)
+
+        bit8_window_sizes = torch.tensor(bit8_window_sizes, device=device).view(-1, 1, 1)
+        bit4_window_sizes = torch.tensor(bit4_window_sizes, device=device).view(-1, 1, 1)
+
+        # --- FP8 mask ---
+        causal_mask = kv_idx <= q_idx
+        bit8_window_mask = kv_idx > (q_idx - bit8_window_sizes)
+        sink_mask = kv_idx < sink_window_size
+        fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
+
+        # --- INT4 mask ---
+        kv_idx_4bit = kv_idx - seq_len // 2
+        bit8_window_mask_4bit = kv_idx_4bit <= (q_idx - bit8_window_sizes)
+        bit4_window_mask = kv_idx_4bit > (q_idx - bit8_window_sizes - bit4_window_sizes)
+        bit4_no_sink_mask = kv_idx_4bit >= sink_window_size
+        int4_mask = bit4_no_sink_mask & bit8_window_mask_4bit & bit4_window_mask
+
+        is_bit8_part = kv_idx < seq_len // 2
+        final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
+
+        return final_mask[:, :seq_len // 2, :]  # 每个 head 一张 mask（只保留后半段）
+
     def construct_mix_bit_mask(seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
         """
         返回 shape = (L, L) 的 mask，True表示可以attend，False表示mask掉。
@@ -262,7 +346,7 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, sink
         final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
 
         # return final_mask  # shape = (L, L)，dtype = bool
-        return final_mask[: seq_len // 2, :]
+        return final_mask[:seq_len // 2, :]
 
     def attention_fn(
         module, q, k, v, attn_mask,
@@ -314,18 +398,29 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, sink
             k_bit8_bit4 = torch.cat([k_bit8, k_bit4], dim=2)
             v_bit8_bit4 = torch.cat([v_bit8, v_bit4], dim=2)
             
-            mask = construct_mix_bit_mask(seq_len=kv_len*2,
-                                bit8_window_size=bit8_window_size,
-                                bit4_window_size=bit4_window_size,
-                                sink_window_size=sink_window_size)
-            
-            # TODO 支持decode 和 inc prefill
+            # Choose mask construction based on input type
+            if is_per_head:
+                mask = construct_mix_bit_mask_per_head(
+                    seq_len=kv_len*2,
+                    bit8_window_sizes=bit8_window_sizes,
+                    bit4_window_sizes=bit4_window_sizes,
+                    sink_window_size=sink_window_size
+                )
+            else:
+                mask = construct_mix_bit_mask(
+                    seq_len=kv_len*2,
+                    bit8_window_size=bit8_window_sizes,
+                    bit4_window_size=bit4_window_sizes,
+                    sink_window_size=sink_window_size
+                )
+            # import pdb; pdb.set_trace()
             # if q_len < 5:
             #     import pdb; pdb.set_trace()
             # if q_len < 5:
             #     import pdb; pdb.set_trace()
             # mask = mask[-q_len*2:, :]
-            mask = mask[-q_len:, :]
+            # TODO 支持per head
+            mask = mask[:, -q_len:, :]
             
             # logger.info(f"mask: {mask.float().sum(dim=1)}")
             # import pdb; pdb.set_trace()
@@ -344,3 +439,6 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_size=0, bit4_window_size=0, sink
                 )
         
     return attention_fn
+
+
+

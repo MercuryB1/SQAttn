@@ -75,8 +75,9 @@ def main():
     #     device = model.hf_device_map["lm_head"]
     logger.info(f"use device: {device}")
     
-    avg_bits = compress_model(model, tokenizer, device, args)  
-    logger.info(f"avg bits: {avg_bits}")
+    overall_avg, avg_bits_per_layer = compress_model(model, tokenizer, device, args)  
+    logger.info(f"avg bits: {overall_avg}")
+    logger.info(f"avg bits per layer: {avg_bits_per_layer}")
     logger.info("*"*30)
     
     model.cuda()

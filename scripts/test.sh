@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=0
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$jsq:$PYTHONPATH
 
@@ -13,9 +13,10 @@ python ${sqattn}/main.py \
 --quant \
 --qk_qtype int \
 --v_qtype e4m3 \
+--eval_ppl \
 --eval_gsm8k \
---bit8_thres_cos 0.999 \
---bit8_thres_rmse 0.03 \
+--bit8_thres_cos 0.9 \
+--bit8_thres_rmse 0.1 \
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \
