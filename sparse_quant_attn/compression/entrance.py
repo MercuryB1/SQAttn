@@ -1,9 +1,8 @@
-from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
-from sparse_quant_attn.utils.model_utils import get_blocks, move_embed, get_named_linears
+from sparse_quant_attn.utils.model_utils import get_blocks, move_embed
 from sparse_quant_attn.compression.calibration import get_calib_dataset
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
 import gc
@@ -66,32 +65,6 @@ def compress_model(model, tokenizer, device, args):
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
-        # named_linears = get_named_linears(layer)
-        
-        #  # firstly, get input features of all linear layers
-        # def cache_input_hook(m, x, y, name, feat_dict):
-        #     x = x[0]
-        #     x = x.detach().cpu()
-        #     feat_dict[name].append(x)
-
-        # input_feat = defaultdict(list)
-        
-        # handles = []
-        # for name in named_linears:
-        #     handles.append(
-        #         named_linears[name].register_forward_hook(
-        #             functools.partial(cache_input_hook, name=name, feat_dict=input_feat)
-        #         )
-        #     )
-        # inps = inps.to(next(layer.parameters()).device)  # in case multi-gpu
-        # # get output as next layer's input
-        
-        
-        # layer(inps, **layer_kwargs)[0]
-        
-        # for h in handles:
-        #     h.remove()
-        # input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
         
         #TODO: quantize attn
         # logger.info(f"{layer.self_attn.config._attn_implementation}")
@@ -106,10 +79,8 @@ def compress_model(model, tokenizer, device, args):
                 "bit4": bit4_window_sizes,
                 "sink": 16  # 如需支持 per-layer sink window，可改为 list
             }
-            # import pdb; pdb.set_trace()
             #TODO per head support
             replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
-        # replace_sdpa_for_block(layer, i, args, bit8_window_size=0, bit4_window_size=0, sink_window_size=0)
         # update output after compression
         inps = layer(inps, **layer_kwargs)[0]
         
@@ -289,19 +260,6 @@ def construct_mix_bit_mask_per_head(seq_len, bit8_window_sizes, bit4_window_size
 
     return final_mask  # shape: (num_heads, L, L)
 
-
-# #TODO 增加int4的计算
-# def compute_avg_bits(bits_alloc, max_window_size):
-#     total_bits = 0
-#     total_tokens = 0
-#     # import pdb; pdb.set_trace()
-#     for window_sizes in bits_alloc.values():
-#         mask = construct_mix_bit_mask(max_window_size*2, window_sizes[0], window_sizes[1], 32)
-#         mask = mask[:max_window_size, :max_window_size]
-#         total_bits += torch.sum(mask.float()) * 8 # 8 bits per token
-#         total_tokens += mask.numel()
-#     avg_bits = total_bits / (total_tokens / 2)
-#     return avg_bits
 
 
 def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: int = 32):
