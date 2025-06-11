@@ -6,10 +6,10 @@ export PYTHONPATH=$sqattn:$PYTHONPATH
 model_path=/mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2
 calib_dataset=gsm8k
 
-# 分别定义 GPU, cos 阈值, rmse 阈值的对应关系
-GPUS=(3 5 6 7)
-COS_THRES=(0.9990 0.9992 0.9994 0.9996)
-RMSE_THRES=(0.010 0.012 0.014 0.016 )
+# 逐步放松的 cos-rmse 对
+GPUS=(0 1 2 3 4 5 6 7)
+COS_THRES=(0.9996 0.9994 0.9992 0.9990 0.9988 0.9986 0.9984 0.9982)
+RMSE_THRES=(0.010  0.011  0.012  0.013  0.014  0.015  0.016  0.017)
 
 for i in "${!GPUS[@]}"; do
   GPU=${GPUS[$i]}
@@ -34,4 +34,4 @@ for i in "${!GPUS[@]}"; do
   " > "$LOG_FILE" 2>&1 &
 done
 
-echo "All jobs launched in background with matched cos-rmse pairs."
+echo "🚀 All 8 quant jobs launched from strict → loose setting."

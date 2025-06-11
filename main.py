@@ -77,7 +77,8 @@ def main():
     
     overall_avg, avg_bits_per_layer = compress_model(model, tokenizer, device, args)  
     logger.info(f"avg bits: {overall_avg}")
-    logger.info(f"avg bits per layer: {avg_bits_per_layer}")
+    for layer_idx in range(len(avg_bits_per_layer)):
+        logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
     logger.info("*"*30)
     
     model.cuda()

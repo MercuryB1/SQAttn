@@ -15,8 +15,8 @@ python ${sqattn}/main.py \
 --v_qtype e4m3 \
 --eval_ppl \
 --eval_gsm8k \
---bit8_thres_cos 0.9 \
---bit8_thres_rmse 0.1 \
+--bit8_thres_cos 0.999 \
+--bit8_thres_rmse 0.02 \
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \

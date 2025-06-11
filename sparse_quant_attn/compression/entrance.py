@@ -136,7 +136,7 @@ def search_bit8_window_size_for_head(layer, layer_idx, head_id, inps, ori_output
         )
         quant_outputs = layer(inps, **layer_kwargs)[0]
         sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
+        # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
         if sim >= thres_cos and rmse <= thres_rmse:
             return w
     return bit8_window_candidate_sizes[-1]
@@ -144,7 +144,7 @@ def search_bit8_window_size_for_head(layer, layer_idx, head_id, inps, ori_output
 
 @torch.no_grad()
 def grid_search_block_window_size_8bit_only_per_head(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
-    logger.info(f"Starting per-head grid search for layer {layer_idx}")
+    # logger.info(f"Starting per-head grid search for layer {layer_idx}")
     bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
     if max_window_size not in bit8_window_candidate_sizes:
         bit8_window_candidate_sizes.append(max_window_size)
@@ -162,6 +162,7 @@ def grid_search_block_window_size_8bit_only_per_head(layer, layer_idx, inps, ori
             args
         )
         bit8_windows.append(best_w)
+        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
         # per_head_windows.append((best_w, 0))  # 目前只支持 8bit，4bit=0
     return bit8_windows, None  # List[(bit8, bit4)] × num_heads
 
@@ -341,7 +342,8 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
         )  # shape = (H, L, 2L)
 
         # 截取有效部分 (只看 q 的前半部分)
-        mask = mask[:, :max_window_size, :]  # (H, L, 2L)
+        #TODO need to support for INT4
+        mask = mask[:, :max_window_size, :max_window_size]  # (H, L, L)
         numel = mask.shape[1] * mask.shape[2] // 2
 
         layer_head_bits = []
