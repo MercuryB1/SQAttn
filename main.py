@@ -29,7 +29,7 @@ def build_model_and_tokenizer(args):
     enc = AutoTokenizer.from_pretrained(
         args.model, use_fast=False, trust_remote_code=True
     )
-    kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True}
+    kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True}
     model = AutoModelForCausalLM.from_pretrained(
         args.model, config=config, trust_remote_code=True, **kwargs
     )
@@ -61,6 +61,8 @@ def main():
     parser.add_argument("--v_qtype", type=str, default="int", choices=["int", "e4m3", "e5m2"], help="quantization type for v")
     parser.add_argument("--bit8_thres_cos", type=float, default=0.9999, help="threshold for cosine similarity for bit8")
     parser.add_argument("--bit8_thres_rmse", type=float, default=0.01, help="threshold for rmse for bit8")
+    parser.add_argument("--bit4_thres_cos", type=float, default=0.9999, help="threshold for cosine similarity for bit4")
+    parser.add_argument("--bit4_thres_rmse", type=float, default=0.01, help="threshold for rmse for bit4")
     parser.add_argument("--sample_output_file", type=str, default="gsm8k_res.jsonl", help="file for saving sample output")
     
     args = parser.parse_args()
@@ -80,7 +82,6 @@ def main():
     for layer_idx in range(len(avg_bits_per_layer)):
         logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
     logger.info("*"*30)
-    
     model.cuda()
     evaluate(model, tokenizer, args)
     

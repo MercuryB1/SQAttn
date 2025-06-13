@@ -4,6 +4,9 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 import copy
 from .quant_utils import FloatQuantizer, IntegerQuantizer
+import math
+import os
+import matplotlib.pyplot as plt
 
 
 def int4_quant(x):
@@ -148,12 +151,8 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
             kv_len = k.shape[2]
             km = k.mean(dim=2, keepdim=True)
             k = k - km
+            
             # per token quantization
-            # q_bit8, _, _ = pseudo_quantize_tensor(q, group_size=dim, zero_point=True, bit_width=8)
-            # k_bit8, _, _ = pseudo_quantize_tensor(k, group_size=dim, zero_point=True, bit_width=8)
-            # v_bit8, _, _ = pseudo_quantize_tensor(v, group_size=dim, zero_point=True, bit_width=8)
-            # k_bit4, _, _ = pseudo_quantize_tensor(k, group_size=dim, zero_point=True, bit_width=4)
-            # v_bit4, _, _ = pseudo_quantize_tensor(v, group_size=dim, zero_point=True, bit_width=4)
             if args.qk_qtype == "int":
                 bit8_qk_quantizer = IntegerQuantizer(8, False, "per_token")
                 bit4_qk_quantizer = IntegerQuantizer(4, False, "per_token")
@@ -204,14 +203,13 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
                     bit4_window_size=bit4_window_sizes,
                     sink_window_size=sink_window_size
                 )
-            # import pdb; pdb.set_trace()
-            # if q_len < 5:
-            #     import pdb; pdb.set_trace()
-            # if q_len < 5:
-            #     import pdb; pdb.set_trace()
+
             # mask = mask[-q_len*2:, :]
             # TODO 支持per head
-            mask = mask[:, -q_len:, :]
+            if is_per_head:
+                mask = mask[:, -q_len:, :]
+            else:
+                mask = mask[-q_len:, :]
             
             # logger.info(f"mask: {mask.float().sum(dim=1)}")
             # import pdb; pdb.set_trace()
@@ -224,7 +222,44 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
                 )
             # import pdb; pdb.set_trace()
             return attn_output[:, :q_len, :, :], attn_weights
+        
         else:
+            def cal_attn_weight(query, key, is_causal=True, attn_mask=None):
+                key = repeat_kv(key, 6)
+                query = query.contiguous()
+                key = key.contiguous()
+                L, S = query.size(-2), key.size(-2)
+                scale_factor = 1 / math.sqrt(query.size(-1))
+                attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+                if is_causal:
+                    assert attn_mask is None
+                    temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+                    attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+                    attn_bias.to(query.dtype)
+
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+                    else:
+                        attn_bias = attn_mask + attn_bias
+                attn_weight = query @ key.transpose(-2, -1) * scale_factor
+                attn_weight += attn_bias
+                attn_weight = torch.softmax(attn_weight, dim=-1)
+                import torch.nn.functional as F
+                # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
+                attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
+                return attn_weight_pool
+            
+            attn_weights = cal_attn_weight(q, k)
+            os.makedirs(f'attn_vis_softmax_max_pool/layer_{layer_idx}', exist_ok=True)
+            attn_map = attn_weights.detach().to(torch.float32).cpu().mean(dim=0) # [H, Q, K]
+            # import pdb; pdb.set_trace()
+            for h in range(attn_map.shape[0]):
+                plt.imshow(attn_map[h], cmap='coolwarm', aspect='auto')
+                plt.colorbar()
+                plt.title(f'Layer {layer_idx} Head {h}')
+                plt.savefig(f'attn_vis_softmax_max_pool/layer_{layer_idx}/head_{h}.png')
+                plt.close()
             return sdpa_attention_forward(
                     module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )
@@ -233,3 +268,13 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
 
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)

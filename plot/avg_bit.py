@@ -77,11 +77,42 @@ special_name = "SageAttn-8bit"
 special_bit = 8.0           # 横坐标
 special_acc = 0.7649         # 纵坐标
 
+
+per_head_bits = [6.426395303108862,
+6.092538172983669,
+5.498031790051949,
+5.18834587696772,
+4.766221850461838,
+4.510190987356189,
+4.377425725135747,
+4.091485132115062,
+3.980896674538493,
+3.6508476000498478,
+3.5235869200804077,
+3.430485154862522,
+3.3397369193414943,
+3.181172912407503]
+per_head_acc = [0.7702805155420773,
+0.7649734647460197,
+0.7672479150871873,
+0.7664897649734648,
+0.7573919636087946,
+0.7664897649734648,
+0.7634571645185747,
+0.7581501137225171,
+0.7649734647460197,
+0.7649734647460197,
+0.7505686125852918,
+0.7467778620166793,
+0.7445034116755117,
+0.730098559514784]
+
 # 全精度水平线
 fp_acc = 0.7687
 # 画图
-plt.figure(figsize=(6, 4))
-plt.plot(avg_bits, acc, marker='o', linewidth=2)
+plt.figure(figsize=(9, 6))
+plt.plot(avg_bits, acc, marker='o', linewidth=2, label="per-attn")
+plt.plot(per_head_bits, per_head_acc, marker='s', linewidth=2, linestyle='-', color='green', label="per-head")
 plt.scatter(special_bit, special_acc, color='red', zorder=5, label=special_name)
 plt.text(special_bit + 0.1, special_acc, special_name, color='red', fontsize=9)
 
@@ -94,7 +125,7 @@ plt.xlabel("Average Bitwidth")
 plt.ylabel("Accuracy (%)")
 plt.title("Accuracy vs. Average Bitwidth")
 plt.grid(True)
-
+plt.legend()
 # 显示图像
 plt.tight_layout()
 plt.savefig("accuracy_vs_bitwidth.png")

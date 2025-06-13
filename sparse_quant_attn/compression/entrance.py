@@ -7,9 +7,7 @@ from sparse_quant_attn.compression.calibration import get_calib_dataset
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
 import gc
 from tqdm import tqdm
-import functools
-import numpy as np
-
+from sparse_quant_attn.compression.window_search import grid_search_block_window_size_per_head, grid_search_block_window_size_per_head_v2
 
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
@@ -71,9 +69,8 @@ def compress_model(model, tokenizer, device, args):
         # if not (i == 0 or i == len(layers) - 1): 
         # replace_sdpa_for_block(layer, i, args)
         if i !=0 and i != len(layers) - 1:
-            ori_outputs = layer(inps, **layer_kwargs)[0]
-            # bit8_window_size, bit4_window_size = grid_search_block_window_size_8bit_only(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
+            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
+            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
                 "bit4": bit4_window_sizes,
@@ -81,6 +78,7 @@ def compress_model(model, tokenizer, device, args):
             }
             #TODO per head support
             replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+        
         # update output after compression
         inps = layer(inps, **layer_kwargs)[0]
         
@@ -90,115 +88,6 @@ def compress_model(model, tokenizer, device, args):
     return compute_avg_bits(bits_alloc, max_window_size)
     # return 0
 
-
-@torch.no_grad()
-def search_bit8_window_size_for_head(layer, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
-    for w in bit8_window_candidate_sizes:
-        # 替换指定 head 的注意力 kernel（你要确保 replace_sdpa_for_block 支持 per-head）
-        # Construct a list where only head_id has window size w, others use max_window_size
-        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layer.self_attn.config.num_attention_heads
-        bit8_window_sizes[head_id] = w
-        bit4_window_sizes = [0] * layer.self_attn.config.num_attention_heads
-        replace_sdpa_for_block(
-            layer, layer_idx, args,
-            bit8_window_sizes=bit8_window_sizes,
-            bit4_window_sizes=bit4_window_sizes,
-            sink_window_size=32,
-        )
-        quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit8_window_candidate_sizes[-1]
-
-
-@torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
-    # logger.info(f"Starting per-head grid search for layer {layer_idx}")
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
-    
-    # per_head_windows = []
-    bit8_windows = []
-    for h in range(layer.self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        best_w = search_bit8_window_size_for_head(
-            layer, layer_idx, h,
-            inps, ori_outputs,
-            bit8_window_candidate_sizes,
-            args.bit8_thres_cos,
-            args.bit8_thres_rmse,
-            layer_kwargs,
-            args
-        )
-        bit8_windows.append(best_w)
-        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
-        # per_head_windows.append((best_w, 0))  # 目前只支持 8bit，4bit=0
-    return bit8_windows, None  # List[(bit8, bit4)] × num_heads
-
-
-@torch.no_grad()
-def grid_search_block_window_size_8bit_only(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
-    logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
-    # bit8_window_candidate_sizes = list(range(128, args.seqlen + 1, 128))
-    # Evenly distribute candidate sizes up to max_window_size
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
-    bit8_thres_cos = args.bit8_thres_cos
-    bit8_thres_rmse = args.bit8_thres_rmse
-    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
-    return bit8_window_size, 0
-
-@torch.no_grad()
-def grid_search_block_window_size(layer, layer_idx, inps, ori_outputs, layer_kwargs, args):
-
-    logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
-    bit8_window_candidate_sizes = list(range(16, args.seqlen + 1, 16))
-    bit8_thres_cos = 0.9999
-    bit8_thres_rmse = 0.05
-    bit4_thres_cos = 0.9999
-    bit4_thres_rmse = 0.01
-
-    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
-    bit4_window_candidate_sizes = bit8_window_candidate_sizes[:(args.seqlen-bit8_window_size)//16]
-    bit4_window_size = search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, bit4_thres_cos, bit4_thres_rmse, layer_kwargs, args)
-    logger.info(f"Best bit8 window size: {bit8_window_size}, best bit4 window size: {bit4_window_size}")
-
-    return bit8_window_size, bit4_window_size
-
-    
-def compute_cos_rmse(a: torch.Tensor, b: torch.Tensor):
-    a = a.view(-1).float()
-    b = b.view(-1).float()
-    cos_sim = F.cosine_similarity(a, b, dim=0).item()
-    rmse = torch.sqrt(F.mse_loss(a, b)).item()
-    return cos_sim, rmse
-
-@torch.no_grad()
-def search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
-    for w in bit8_window_candidate_sizes:
-        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=w, bit4_window_size=0, sink_window_size=32)
-        # replace
-        quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit8_window_candidate_sizes[-1]
-
-
-@torch.no_grad()
-def search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
-    for w in bit4_window_candidate_sizes:
-        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=bit8_window_size, bit4_window_size=w, sink_window_size=32)
-        quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        logger.info(f"Bit4 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit4_window_candidate_sizes[-1]
 
 
 def construct_mix_bit_mask(seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
@@ -294,21 +183,23 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
         mask = construct_mix_bit_mask_per_head(
             seq_len=max_window_size * 2,
             bit8_window_sizes=bit8_windows,
-            bit4_window_sizes=0,
+            bit4_window_sizes=bit4_windows,
             sink_window_size=sink_window,
             device='cuda'
         )  # shape = (H, L, 2L)
 
         # 截取有效部分 (只看 q 的前半部分)
         #TODO need to support for INT4
-        mask = mask[:, :max_window_size, :max_window_size]  # (H, L, L)
-        numel = mask.shape[1] * mask.shape[2] // 2
-
+        bit8_mask = mask[:, :max_window_size, :max_window_size]  # (H, L, L)
+        bit4_mask = mask[:, :max_window_size, max_window_size:]  # (H, L, L)
+        numel = bit8_mask.shape[1] * bit8_mask.shape[2] // 2
+        # import pdb; pdb.set_trace()
         layer_head_bits = []
         for h in range(num_heads):
-            attend_cnt = mask[h].sum().item()
+            bit8_attend_cnt = bit8_mask[h].sum().item()
+            bit4_attend_cnt = bit4_mask[h].sum().item()
             # 假设所有 attend token 都来自 int8 区域，等价于原版实现
-            avg_bits = (attend_cnt * 8) / numel
+            avg_bits = (bit8_attend_cnt * 8 + bit4_attend_cnt * 4) / numel
             layer_head_bits.append(avg_bits)
             all_head_bits.append(avg_bits)
 
