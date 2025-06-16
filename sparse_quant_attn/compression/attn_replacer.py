@@ -3,40 +3,10 @@ import torch.nn as nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 import copy
-from .quant_utils import FloatQuantizer, IntegerQuantizer
+from sparse_quant_attn.compression.fake_quant import FloatQuantizer, IntegerQuantizer
 import math
 import os
 import matplotlib.pyplot as plt
-
-
-def int4_quant(x):
-    # 计算张量中绝对值的最大值
-    max_abs_val = torch.max(torch.abs(x))
-
-    # 如果最大绝对值非常小 (例如，接近0)，说明张量本身接近全零
-    # 此时直接返回原张量，避免 scale 为 0 或过小导致后续计算出现 NaN/Inf
-    if max_abs_val < 1e-9: # 使用一个小的阈值判断是否接近零
-        return torch.zeros_like(x)  # 返回全零的张量，保持原形状和数据类型
-
-    # 计算缩放因子 (scale)
-    # 对于 int4 对称量化，我们将数值映射到 [-7, 7] 这个范围 (2^(4-1) - 1 = 7)
-    scale = max_abs_val / 7.0
-
-    # 量化：将输入值除以 scale，然后四舍五入到最近的整数
-    quantized_x = torch.round(x / scale)
-
-    # 裁剪：将量化后的值限制在 int4 的对称表示范围内 [-7, 7]
-    clamped_x = torch.clamp(quantized_x, -7.0, 7.0)
-
-    # 反量化：将裁剪后的值乘以 scale，恢复到原始的数值范围（但精度已降低）
-    dequantized_x = clamped_x * scale
-
-    return dequantized_x
-
-def fp8_quant(x):
-    x_fp8_sim=x.to(torch.float8_e4m3fn)
-    y=x_fp8_sim.to(torch.bfloat16)
-    return y
 
 
 @torch.no_grad()
@@ -211,55 +181,48 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
             else:
                 mask = mask[-q_len:, :]
             
-            # logger.info(f"mask: {mask.float().sum(dim=1)}")
-            # import pdb; pdb.set_trace()
-            # logger.info(f"mask shape: {mask.shape}")
-            # logger.info(f"q_bit8_bit8 shape: {q_bit8_bit8.shape}")
-            # logger.info(f"k_bit8_bit4 shape: {k_bit8_bit4.shape}")
-            # logger.info(f"v_bit8_bit4 shape: {v_bit8_bit4.shape}")
             attn_output, attn_weights = sdpa_attention_forward(
                     module, q_bit8_bit8, k_bit8_bit4, v_bit8_bit4, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )
-            # import pdb; pdb.set_trace()
             return attn_output[:, :q_len, :, :], attn_weights
         
         else:
-            def cal_attn_weight(query, key, is_causal=True, attn_mask=None):
-                key = repeat_kv(key, 6)
-                query = query.contiguous()
-                key = key.contiguous()
-                L, S = query.size(-2), key.size(-2)
-                scale_factor = 1 / math.sqrt(query.size(-1))
-                attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-                if is_causal:
-                    assert attn_mask is None
-                    temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
-                    attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-                    attn_bias.to(query.dtype)
+            if args.vis_attn:
+                def cal_attn_weight(query, key, is_causal=True, attn_mask=None):
+                    key = repeat_kv(key, 6)
+                    query = query.contiguous()
+                    key = key.contiguous()
+                    L, S = query.size(-2), key.size(-2)
+                    scale_factor = 1 / math.sqrt(query.size(-1))
+                    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+                    if is_causal:
+                        assert attn_mask is None
+                        temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+                        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+                        attn_bias.to(query.dtype)
 
-                if attn_mask is not None:
-                    if attn_mask.dtype == torch.bool:
-                        attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-                    else:
-                        attn_bias = attn_mask + attn_bias
-                attn_weight = query @ key.transpose(-2, -1) * scale_factor
-                attn_weight += attn_bias
-                attn_weight = torch.softmax(attn_weight, dim=-1)
-                import torch.nn.functional as F
-                # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
-                attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
-                return attn_weight_pool
-            
-            attn_weights = cal_attn_weight(q, k)
-            os.makedirs(f'attn_vis_softmax_max_pool/layer_{layer_idx}', exist_ok=True)
-            attn_map = attn_weights.detach().to(torch.float32).cpu().mean(dim=0) # [H, Q, K]
-            # import pdb; pdb.set_trace()
-            for h in range(attn_map.shape[0]):
-                plt.imshow(attn_map[h], cmap='coolwarm', aspect='auto')
-                plt.colorbar()
-                plt.title(f'Layer {layer_idx} Head {h}')
-                plt.savefig(f'attn_vis_softmax_max_pool/layer_{layer_idx}/head_{h}.png')
-                plt.close()
+                    if attn_mask is not None:
+                        if attn_mask.dtype == torch.bool:
+                            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+                        else:
+                            attn_bias = attn_mask + attn_bias
+                    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+                    attn_weight += attn_bias
+                    attn_weight = torch.softmax(attn_weight, dim=-1)
+                    import torch.nn.functional as F
+                    # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
+                    attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
+                    return attn_weight_pool
+                
+                attn_weights = cal_attn_weight(q, k)
+                os.makedirs(f'attn_vis_softmax_max_pool/layer_{layer_idx}', exist_ok=True)
+                attn_map = attn_weights.detach().to(torch.float32).cpu().mean(dim=0) # [H, Q, K]
+                for h in range(attn_map.shape[0]):
+                    plt.imshow(attn_map[h], cmap='coolwarm', aspect='auto')
+                    plt.colorbar()
+                    plt.title(f'Layer {layer_idx} Head {h}')
+                    plt.savefig(f'attn_vis_softmax_max_pool/layer_{layer_idx}/head_{h}.png')
+                    plt.close()
             return sdpa_attention_forward(
                     module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )

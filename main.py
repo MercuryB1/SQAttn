@@ -6,6 +6,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from loguru import logger
 from sparse_quant_attn.utils.eval_utils import evaluate 
 from sparse_quant_attn.compression.entrance import compress_model
+from sparse_quant_attn.plot.window_size_alloc import plot_window_size_alloc
+
 
 def seed_everything(seed: int):
     random.seed(seed)  # Python built-in random module
@@ -64,7 +66,8 @@ def main():
     parser.add_argument("--bit4_thres_cos", type=float, default=0.9999, help="threshold for cosine similarity for bit4")
     parser.add_argument("--bit4_thres_rmse", type=float, default=0.01, help="threshold for rmse for bit4")
     parser.add_argument("--sample_output_file", type=str, default="gsm8k_res.jsonl", help="file for saving sample output")
-    
+    parser.add_argument("--vis_attn", action="store_true", help="visualize attention")
+    parser.add_argument("--plot_window_size_alloc", action="store_true", help="plot window size allocation")
     args = parser.parse_args()
     seed_everything(args.seed)
         
@@ -77,10 +80,14 @@ def main():
     #     device = model.hf_device_map["lm_head"]
     logger.info(f"use device: {device}")
     
-    overall_avg, avg_bits_per_layer = compress_model(model, tokenizer, device, args)  
+    bits_per_head, avg_bits_per_layer, overall_avg = compress_model(model, tokenizer, device, args)  
+    # import pdb; pdb.set_trace()
     logger.info(f"avg bits: {overall_avg}")
     for layer_idx in range(len(avg_bits_per_layer)):
         logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
+    if args.plot_window_size_alloc:
+        save_path = os.path.join("/mnt/disk3/wzn/SQAttn/scripts", f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
+        plot_window_size_alloc(bits_per_head, save_path)
     logger.info("*"*30)
     model.cuda()
     evaluate(model, tokenizer, args)

@@ -42,20 +42,6 @@ def doc_to_text(doc, fewshot_prompt):
         + "\nLet's think step by step\n"
     )
 
-# def get_calib_dataset_gsm8k(tokenizer=None, device="cuda"):
-#     fewshot_prompt = open("/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt").read()
-#     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
-#     dataset = load_dataset("gsm8k", "main", download_config=config)
-#     dataset = dataset["train"].select(range(1))
-#     samples = []
-#     for doc in dataset:
-#         context = doc_to_text(doc, fewshot_prompt)
-#         input_ids = tokenizer(context)['input_ids']
-#         context_enc = torch.tensor([input_ids]).to(device)
-#         samples.append(context_enc)
-# #     import pdb; pdb.set_trace()
-#     return samples[0], None
-
 def get_calib_dataset_gsm8k(tokenizer=None, device="cuda"):
     fewshot_prompt = open("/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt").read()
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)

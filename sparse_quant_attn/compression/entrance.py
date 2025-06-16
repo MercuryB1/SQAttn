@@ -68,7 +68,8 @@ def compress_model(model, tokenizer, device, args):
         # logger.info(f"{layer.self_attn.config._attn_implementation}")
         # if not (i == 0 or i == len(layers) - 1): 
         # replace_sdpa_for_block(layer, i, args)
-        if i !=0 and i != len(layers) - 1:
+        # if i !=0 and i != len(layers) - 1:
+        if i > 20:
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
             bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
@@ -76,7 +77,6 @@ def compress_model(model, tokenizer, device, args):
                 "bit4": bit4_window_sizes,
                 "sink": 16  # 如需支持 per-layer sink window，可改为 list
             }
-            #TODO per head support
             replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
         
         # update output after compression
@@ -153,7 +153,7 @@ def construct_mix_bit_mask_per_head(seq_len, bit8_window_sizes, bit4_window_size
 
 def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: int = 32):
     """
-    计算所有层所有 head 的平均比特数（使用 per-head 掩码）
+    计算所有层所有 head 的比特数（使用 per-head 掩码）
 
     参数：
         bits_alloc: dict[int, dict]，如：
@@ -165,11 +165,13 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
         sink_window_size: 若未在 bits_alloc 中单独指定，使用该默认值
 
     返回：
-        avg_bits_overall: 所有层所有 head 的平均比特数（float）
-        avg_bits_per_layer: 每层的平均比特数组（List[float]）
+        bits_per_head: dict[int, List[float]]，每个layer中每个head的比特数
+        avg_bits_per_layer: List[float]，每层的平均比特数
+        overall_avg: float，所有层所有head的平均比特数
     """
-    all_head_bits = []
+    bits_per_head = {}
     avg_bits_per_layer = []
+    all_head_bits = []
 
     for layer_idx, layer_cfg in bits_alloc.items():
         bit8_windows = layer_cfg["bit8"]
@@ -177,34 +179,33 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
         sink_window = layer_cfg.get("sink", sink_window_size)
 
         num_heads = len(bit8_windows)
-        # assert len(bit4_windows) == num_heads, f"bit4 config mismatch at layer {layer_idx}"
 
-        # 构造 mask：shape = (H, L, 2L)
+        # 构造 mask：shape = (H, 2L, 2L)
         mask = construct_mix_bit_mask_per_head(
             seq_len=max_window_size * 2,
             bit8_window_sizes=bit8_windows,
             bit4_window_sizes=bit4_windows,
             sink_window_size=sink_window,
             device='cuda'
-        )  # shape = (H, L, 2L)
+        )  # shape = (H, 2L, 2L)
 
         # 截取有效部分 (只看 q 的前半部分)
-        #TODO need to support for INT4
         bit8_mask = mask[:, :max_window_size, :max_window_size]  # (H, L, L)
         bit4_mask = mask[:, :max_window_size, max_window_size:]  # (H, L, L)
         numel = bit8_mask.shape[1] * bit8_mask.shape[2] // 2
-        # import pdb; pdb.set_trace()
+
         layer_head_bits = []
         for h in range(num_heads):
             bit8_attend_cnt = bit8_mask[h].sum().item()
             bit4_attend_cnt = bit4_mask[h].sum().item()
-            # 假设所有 attend token 都来自 int8 区域，等价于原版实现
-            avg_bits = (bit8_attend_cnt * 8 + bit4_attend_cnt * 4) / numel
-            layer_head_bits.append(avg_bits)
-            all_head_bits.append(avg_bits)
+            # 计算每个head的比特数
+            bits = (bit8_attend_cnt * 8 + bit4_attend_cnt * 4) / numel
+            layer_head_bits.append(bits)
+            all_head_bits.append(bits)
 
+        bits_per_head[layer_idx] = layer_head_bits
         layer_avg = sum(layer_head_bits) / num_heads
         avg_bits_per_layer.append(layer_avg)
 
     overall_avg = sum(all_head_bits) / len(all_head_bits)
-    return overall_avg, avg_bits_per_layer
+    return bits_per_head, avg_bits_per_layer, overall_avg

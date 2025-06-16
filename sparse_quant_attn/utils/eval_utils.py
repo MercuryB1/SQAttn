@@ -343,67 +343,6 @@ class BaseLM(LM):
                 self._model_call(batched_inps), dim=-1
             ).cpu()  # [batch, padding_length, vocab]
 
-            # dataset_inps.append(batched_inps)
-            # dataset_logits = self._model_logits_on_dataset(dataset_inps)
-            # iter = 0
-            # for chunk in chunks(
-            #         tqdm(re_ord.get_reordered(), disable=disable_tqdm), self.batch_size
-            # ):
-            #     multi_logits = dataset_logits[iter]
-            #     iter+=1
-            #     inps = []
-            #     cont_toks_list = []
-            #     inplens = []
-            #
-            #     padding_length = None
-            #
-            #     # because vectorizing is annoying, we first convert each (context, continuation) pair to padded
-            #     # tensors, then we pack them together into a batch, call the model, and then pick it all apart
-            #     # again because vectorizing is annoying
-            #
-            #     # todo: check if we realy nead the following loop
-            #     for _, context_enc, continuation_enc in chunk:
-            #         # sanity check
-            #         assert len(context_enc) > 0
-            #         assert len(continuation_enc) > 0
-            #         assert len(continuation_enc) <= self.max_length
-            #
-            #         # how this all works:
-            #         #          CTX      CONT
-            #         # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
-            #         # gpt2    \               \
-            #         # logits   1 2 3|4 5 6 7 8 9   <- the ctx half gets tossed out by the
-            #         # cont_toks      4 5 6 7 8 9      [:, -len(continuation_enc):, :self.vocab_size] slice
-            #
-            #         # when too long to fit in context, truncate from the left
-            #         inp = torch.tensor(
-            #             (context_enc + continuation_enc)[-(self.max_length + 1):][:-1],
-            #             dtype=torch.long,
-            #         ).to(self.device)
-            #         (inplen,) = inp.shape
-            #
-            #         cont = continuation_enc
-            #
-            #         # since in _collate we make sure length is descending, the longest is always the first one.
-            #         padding_length = (
-            #             padding_length if padding_length is not None else inplen
-            #         )
-            #
-            #         # pad length from seq to padding_length
-            #         inp = torch.cat(
-            #             [
-            #                 inp,  # [seq]
-            #                 torch.zeros(padding_length - inplen, dtype=torch.long).to(
-            #                     inp.device
-            #                 ),  # [padding_length - seq]
-            #             ],
-            #             dim=0,
-            #         )
-            #
-            #         inps.append(inp.unsqueeze(0))  # [1, padding_length]
-            #         cont_toks_list.append(cont)
-            #         inplens.append(inplen)
-
             for (cache_key, _, _), logits, inp, inplen, cont_toks in zip(
                 chunk, multi_logits, inps, inplens, cont_toks_list
             ):
@@ -612,11 +551,6 @@ class LMEvalAdaptor(BaseLM):
         self.model.eval()
 
         self.tokenizer = tokenizer
-
-        # assert isinstance(self.tokenizer, (
-        #     transformers.GPT2Tokenizer, transformers.GPT2TokenizerFast,
-        #     transformers.T5Tokenizer, transformers.T5TokenizerFast,
-        # )), "this tokenizer has not been checked for compatibility yet!"
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.vocab_size = self.tokenizer.vocab_size
 
@@ -632,29 +566,6 @@ class LMEvalAdaptor(BaseLM):
     @property
     def eot_token(self) -> str:
         return self.tokenizer.eos_token
-    
-
-    # @property
-    # def max_length(self):
-    #     if self._max_length != -1:
-    #         return self._max_length
-    #     if hasattr(self.model.config, "n_ctx"):
-    #         return self.model.config.n_ctx
-    #     elif hasattr(self.model.config, "max_position_embeddings"):
-    #         return self.model.config.max_position_embeddings
-    #     elif hasattr(self.model.config, "n_positions"):
-    #         return self.model.config.n_positions
-    #     elif "bloom" in self.model_name:
-    #         return 2048
-    #     elif "llama" in self.model_name:
-    #         return 2048  # TODO: did not check this
-    #     elif "mpt" in self.model_name:
-    #         return 2048
-    #     elif "falcon" in self.model_name:
-    #         return 2048
-    #     else:
-    #         print(self.model.config)
-    #         raise NotImplementedError
     
     
     @property
@@ -690,53 +601,13 @@ class LMEvalAdaptor(BaseLM):
             return_tensors="pt",
         )
     
-    
-    # def tok_decode(self, tokens):
-    #     return self.tokenizer.decode(tokens)
-    
     def tok_decode(self, tokens):
         return self.tokenizer.batch_decode(tokens, skip_special_tokens=True)
 
     def _model_call(self, inps):
         with torch.no_grad():
             return self.model(inps)["logits"]
-        # """
-        # inps: a torch tensor of shape [batch, sequence]
-        # the size of sequence may vary from call to call
-
-        # returns: a torch tensor of shape [batch, sequence, vocab] with the
-        # logits returned from the model
-        # """
-        # with torch.no_grad():
-        #     if isinstance(
-        #         self.model,
-        #         transformers.models.t5.modeling_t5.T5ForConditionalGeneration,
-        #     ):
-        #         dec_inps = torch.cat(
-        #             [
-        #                 torch.tensor(
-        #                     self.model.generation_config.decoder_start_token_id,
-        #                 )
-        #                 .tile(len(inps), 1)
-        #                 .to(inps),
-        #                 inps,
-        #             ],
-        #             dim=1,
-        #         )
-
-        #         kwargs = {
-        #             "decoder_input_ids": dec_inps,
-        #         }
-        #     else:
-        #         kwargs = {}
-        #     out = self.model(inps, **kwargs)[0]
-        #     if (
-        #         "opt" in self.model_name
-        #     ):  # there are a few extra tokens in opt, which we should omit
-        #         return out[:, :, :50257]
-        #     else:
-        #         return out  # [:, :, :self.tokenizer.vocab_size]
-
+        
 
     def model_batched_set(self, inps):
         dataset_logits = []

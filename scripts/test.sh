@@ -19,6 +19,7 @@ python ${sqattn}/main.py \
 --bit8_thres_rmse 0.3 \
 --bit4_thres_cos 0.998 \
 --bit4_thres_rmse 0.25 \
+--plot_window_size_alloc \
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \
