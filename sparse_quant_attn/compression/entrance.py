@@ -63,13 +63,7 @@ def compress_model(model, tokenizer, device, args):
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
-        
-        #TODO: quantize attn
-        # logger.info(f"{layer.self_attn.config._attn_implementation}")
-        # if not (i == 0 or i == len(layers) - 1): 
-        # replace_sdpa_for_block(layer, i, args)
-        # if i !=0 and i != len(layers) - 1:
-        if i > 20:
+        if i !=0 and i != len(layers) - 1:
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
             bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
