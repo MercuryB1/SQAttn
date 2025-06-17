@@ -77,13 +77,13 @@ def is_correct(completion, answer):
 
 
 def evaluate_gsm8k(model, tokenizer, args):
-    fewshot_prompt = open("/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt").read()
+    fewshot_prompt = open(args.gsm8k_prompt).read()
     
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
     dataset = load_dataset("gsm8k", "main", download_config=config)
     
-    test = dataset["test"].select(range(50))
-    # test = dataset["test"]
+    # test = dataset["test"].select(range(50))
+    test = dataset["test"]
 
     # sample_output_file = "gsm8k_res.jsonl"
     sample_output_file = args.sample_output_file

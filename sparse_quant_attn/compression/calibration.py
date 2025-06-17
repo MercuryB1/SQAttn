@@ -3,11 +3,11 @@ import datasets
 from datasets import load_dataset
 
 
-def get_calib_dataset(data="pileval", tokenizer=None, n_samples=512, seq_len=512, device="cuda"):
+def get_calib_dataset(data="pileval", tokenizer=None, n_samples=512, seq_len=512, device="cuda", args=None):
     if data == "pileval":
         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
     elif data == "gsm8k":
-        return get_calib_dataset_gsm8k(tokenizer, device)
+        return get_calib_dataset_gsm8k(tokenizer, device, args.gsm8k_prompt)
     else:
         raise NotImplementedError
     dataset = dataset.shuffle(seed=42)
@@ -42,8 +42,8 @@ def doc_to_text(doc, fewshot_prompt):
         + "\nLet's think step by step\n"
     )
 
-def get_calib_dataset_gsm8k(tokenizer=None, device="cuda"):
-    fewshot_prompt = open("/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt").read()
+def get_calib_dataset_gsm8k(tokenizer=None, device="cuda", gsm8k_prompt=None):
+    fewshot_prompt = open(gsm8k_prompt).read()
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
     dataset = load_dataset("gsm8k", "main", download_config=config)
     dataset = dataset["train"].select(range(10))

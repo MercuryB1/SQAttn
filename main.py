@@ -68,6 +68,8 @@ def main():
     parser.add_argument("--sample_output_file", type=str, default="gsm8k_res.jsonl", help="file for saving sample output")
     parser.add_argument("--vis_attn", action="store_true", help="visualize attention")
     parser.add_argument("--plot_window_size_alloc", action="store_true", help="plot window size allocation")
+    parser.add_argument("--use_full_output", action="store_true", help="use full output for window size search")
+    parser.add_argument("--gsm8k_prompt", type=str, default="/sparse_quant_attn/eval/gsm8k_prompt.txt", help="prompt for gsm8k")
     args = parser.parse_args()
     seed_everything(args.seed)
         

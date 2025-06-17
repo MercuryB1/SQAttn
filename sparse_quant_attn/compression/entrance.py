@@ -7,7 +7,7 @@ from sparse_quant_attn.compression.calibration import get_calib_dataset
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
 import gc
 from tqdm import tqdm
-from sparse_quant_attn.compression.window_search import grid_search_block_window_size_per_head, grid_search_block_window_size_per_head_v2
+from sparse_quant_attn.compression.window_search import grid_search_block_window_size_8bit_only_per_head, grid_search_block_window_size_per_head_v2
 
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
@@ -19,7 +19,8 @@ def compress_model(model, tokenizer, device, args):
         tokenizer=tokenizer,
         n_samples=args.nsamples,
         seq_len=args.seqlen,
-        device=device
+        device=device,
+        args=args
     )
     logger.info("dataset loading complete")
     max_window_size = samples.shape[1]
@@ -64,8 +65,8 @@ def compress_model(model, tokenizer, device, args):
         layer = layers[i]
         layer.cuda()
         if i !=0 and i != len(layers) - 1:
-            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layer, i, inps, ori_outputs, layer_kwargs, max_window_size, args)
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
+            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layers, i, inps, layer_kwargs, max_window_size, args)
+            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
                 "bit4": bit4_window_sizes,
@@ -171,7 +172,11 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
         bit8_windows = layer_cfg["bit8"]
         bit4_windows = layer_cfg["bit4"]
         sink_window = layer_cfg.get("sink", sink_window_size)
-
+        num_heads = len(bit8_windows)
+        if bit8_windows is None:
+            bit8_windows = [0] * num_heads
+        if bit4_windows is None:
+            bit4_windows = [0] * num_heads
         num_heads = len(bit8_windows)
 
         # 构造 mask：shape = (H, 2L, 2L)

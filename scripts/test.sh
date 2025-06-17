@@ -20,6 +20,7 @@ python ${sqattn}/main.py \
 --bit4_thres_cos 0.998 \
 --bit4_thres_rmse 0.25 \
 --plot_window_size_alloc \
+--gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \

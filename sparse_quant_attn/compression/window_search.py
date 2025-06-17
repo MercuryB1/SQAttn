@@ -134,7 +134,11 @@ def grid_search_block_window_size_per_head(layer, layer_idx, inps, ori_outputs, 
 
 
 @torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
+def grid_search_block_window_size_8bit_only_per_head(layers, layer_idx, inps, layer_kwargs, max_window_size, args):
+    if args.use_full_output:
+        ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
+    else:
+        ori_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
     # logger.info(f"Starting per-head grid search for layer {layer_idx}")
     bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
     if max_window_size not in bit8_window_candidate_sizes:
@@ -142,9 +146,9 @@ def grid_search_block_window_size_8bit_only_per_head(layer, layer_idx, inps, ori
     
     # per_head_windows = []
     bit8_windows = []
-    for h in range(layer.self_attn.config.num_attention_heads):  # 当前模型 num_heads
+    for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
         best_w = search_bit8_window_size_for_head(
-            layer, layer_idx, h,
+            layers, layer_idx, h,
             inps, ori_outputs,
             bit8_window_candidate_sizes,
             layer_kwargs,
