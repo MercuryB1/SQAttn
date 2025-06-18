@@ -5,6 +5,7 @@ from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed
 from sparse_quant_attn.compression.calibration import get_calib_dataset
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+from sparse_quant_attn.compression.window_search import model_infer
 import gc
 from tqdm import tqdm
 from sparse_quant_attn.compression.window_search import grid_search_block_window_size_8bit_only_per_head, grid_search_block_window_size_per_head_v2
@@ -60,12 +61,15 @@ def compress_model(model, tokenizer, device, args):
     gc.collect()
     torch.cuda.empty_cache()
     bits_alloc = dict()
-
+    ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
+    # import pdb; pdb.set_trace()
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
+        if args.mse_output == "full":
+            ori_output = layer(inps, **layer_kwargs)[0]
         if i !=0 and i != len(layers) - 1:
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(layers, i, inps, layer_kwargs, max_window_size, args)
+            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
@@ -75,7 +79,10 @@ def compress_model(model, tokenizer, device, args):
             replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
         
         # update output after compression
-        inps = layer(inps, **layer_kwargs)[0]
+        if args.mse_output == "full":
+            inps = ori_output
+        else:
+            inps = layer(inps, **layer_kwargs)[0]
         
         # del input_feat
         layer.cpu()

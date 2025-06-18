@@ -68,7 +68,8 @@ def main():
     parser.add_argument("--sample_output_file", type=str, default="gsm8k_res.jsonl", help="file for saving sample output")
     parser.add_argument("--vis_attn", action="store_true", help="visualize attention")
     parser.add_argument("--plot_window_size_alloc", action="store_true", help="plot window size allocation")
-    parser.add_argument("--use_full_output", action="store_true", help="use full output for window size search")
+    parser.add_argument("--plot_window_size_alloc_save_dir", type=str, default=None, help="save path for window size allocation")
+    parser.add_argument("--mse_output", choices=["full", "remain", "block"], default="full", help="use full output for window size search")
     parser.add_argument("--gsm8k_prompt", type=str, default="/sparse_quant_attn/eval/gsm8k_prompt.txt", help="prompt for gsm8k")
     args = parser.parse_args()
     seed_everything(args.seed)
@@ -88,7 +89,8 @@ def main():
     for layer_idx in range(len(avg_bits_per_layer)):
         logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
     if args.plot_window_size_alloc:
-        save_path = os.path.join("/mnt/disk3/wzn/SQAttn/scripts", f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
+        os.makedirs(args.plot_window_size_alloc_save_dir, exist_ok=True)
+        save_path = os.path.join(args.plot_window_size_alloc_save_dir, f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
         plot_window_size_alloc(bits_per_head, save_path)
     logger.info("*"*30)
     model.cuda()

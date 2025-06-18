@@ -16,10 +16,12 @@ python ${sqattn}/main.py \
 --eval_ppl \
 --eval_gsm8k \
 --bit8_thres_cos 0.996 \
---bit8_thres_rmse 0.3 \
+--bit8_thres_rmse 0.05 \
 --bit4_thres_cos 0.998 \
 --bit4_thres_rmse 0.25 \
 --plot_window_size_alloc \
+--plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
+--mse_output full \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 # --tasks wikitext \
 # --batch_size 1 \

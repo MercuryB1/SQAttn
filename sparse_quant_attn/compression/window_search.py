@@ -35,13 +35,9 @@ def search_bit8_window_size_for_head(layers, layer_idx, head_id, inps, ori_outpu
         bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
         bit8_window_sizes[head_id] = w
         bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
-        # replace_sdpa_for_block(
-        #     layer, layer_idx, args,
-        #     bit8_window_sizes=bit8_window_sizes,
-        #     bit4_window_sizes=bit4_window_sizes,
-        #     sink_window_size=32,
-        # )
-        replace_sdpa_for_block(layers[layer_idx], layer_idx, args,bit8_window_sizes=bit8_window_sizes,bit4_window_sizes=bit4_window_sizes,sink_window_size=32)
+        replace_sdpa_for_block(layers[layer_idx], layer_idx, 
+                               args,bit8_window_sizes=bit8_window_sizes,bit4_window_sizes=bit4_window_sizes,
+                               sink_window_size=32)
         # quant_outputs = layer(inps, **layer_kwargs)[0]
         quant_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
         sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
@@ -50,9 +46,55 @@ def search_bit8_window_size_for_head(layers, layer_idx, head_id, inps, ori_outpu
             return w
     return bit8_window_candidate_sizes[-1]
 
+@torch.no_grad()
+def binary_search_bit8_window_size_for_head(model, layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
+    thres_cos = args.bit8_thres_cos
+    thres_rmse = args.bit8_thres_rmse
+
+    left, right = 0, len(bit8_window_candidate_sizes) - 1
+    best_w = bit8_window_candidate_sizes[-1]
+
+    while left <= right:
+        mid = (left + right) // 2
+        w = bit8_window_candidate_sizes[mid]
+
+        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
+        bit8_window_sizes[head_id] = w
+        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
+
+        replace_sdpa_for_block(layers[layer_idx], layer_idx, args,
+                               bit8_window_sizes=bit8_window_sizes,
+                               bit4_window_sizes=bit4_window_sizes,
+                               sink_window_size=32)
+
+        quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
+        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
+        logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
+        if sim >= thres_cos and rmse <= thres_rmse:
+            best_w = w
+            right = mid - 1  # 尝试更小的 window size
+        else:
+            left = mid + 1  # 增大 window size
+
+    return best_w
+
 
 @torch.no_grad()
-def layers_infer(layers, layer_idx, inps, layer_kwargs, args):
+def model_infer(model, inps, layer_kwargs, args):
+    outputs = inps
+    for layer in model.model.layers:
+        layer = layer.cuda()
+        outputs = layer(outputs, **layer_kwargs)[0]
+        # layer = layer.cpu()
+        torch.cuda.empty_cache()
+    model.model.norm = model.model.norm.to(outputs.device)  
+    outputs = model.model.norm(outputs)
+    model.model.norm = model.model.norm.to("cpu")
+    return outputs
+
+
+@torch.no_grad()
+def layers_infer(model, layers, layer_idx, inps, layer_kwargs, args):
     # Infer through remaining layers starting from layer_idx
     outputs = inps
     for i in range(layer_idx, len(layers)):
@@ -61,6 +103,9 @@ def layers_infer(layers, layer_idx, inps, layer_kwargs, args):
         outputs = layer(outputs, **layer_kwargs)[0]
         # layer = layer.cpu()
         torch.cuda.empty_cache()
+    model.model.norm = model.model.norm.to(outputs.device)  
+    outputs = model.model.norm(outputs)
+    model.model.norm = model.model.norm.to("cpu")
     return outputs
 
 @torch.no_grad()
@@ -134,11 +179,13 @@ def grid_search_block_window_size_per_head(layer, layer_idx, inps, ori_outputs, 
 
 
 @torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head(layers, layer_idx, inps, layer_kwargs, max_window_size, args):
-    if args.use_full_output:
+def grid_search_block_window_size_8bit_only_per_head(model, layers, layer_idx, inps, ori_model_outputs, layer_kwargs, max_window_size, args):
+    if args.mse_output == "remain":
         ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-    else:
+    elif args.mse_output == "block":
         ori_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
+    elif args.mse_output == "full":
+        ori_outputs = ori_model_outputs
     # logger.info(f"Starting per-head grid search for layer {layer_idx}")
     bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
     if max_window_size not in bit8_window_candidate_sizes:
@@ -147,9 +194,9 @@ def grid_search_block_window_size_8bit_only_per_head(layers, layer_idx, inps, la
     # per_head_windows = []
     bit8_windows = []
     for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        best_w = search_bit8_window_size_for_head(
-            layers, layer_idx, h,
-            inps, ori_outputs,
+        best_w = binary_search_bit8_window_size_for_head(
+            model, layers, layer_idx, h,
+            inps, ori_outputs, 
             bit8_window_candidate_sizes,
             layer_kwargs,
             args
