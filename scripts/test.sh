@@ -15,13 +15,13 @@ python ${sqattn}/main.py \
 --v_qtype e4m3 \
 --eval_ppl \
 --eval_gsm8k \
---bit8_thres_cos 0.996 \
---bit8_thres_rmse 0.05 \
+--bit8_thres_cos 0.3 \
+--bit8_thres_rmse 3 \
 --bit4_thres_cos 0.998 \
 --bit4_thres_rmse 0.25 \
 --plot_window_size_alloc \
 --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
---mse_output full \
+--mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 # --tasks wikitext \
 # --batch_size 1 \

@@ -9,6 +9,9 @@ from sparse_quant_attn.compression.window_search import model_infer
 import gc
 from tqdm import tqdm
 from sparse_quant_attn.compression.window_search import grid_search_block_window_size_8bit_only_per_head, grid_search_block_window_size_per_head_v2
+from sparse_quant_attn.compression.kv_manage import get_static_important_token_per_head
+from sparse_quant_attn.utils.model_utils import inject_input_ids, inject_token_list_to_layer
+
 
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
@@ -29,7 +32,6 @@ def compress_model(model, tokenizer, device, args):
     layer_kwargs = {}
     layers[0] = layers[0].cuda()
     move_embed(model, "cuda")
-
     # get input and kwargs to layer 0
     # with_kwargs is only supported in PyTorch 2.0
     # use this Catcher hack for now
@@ -52,24 +54,29 @@ def compress_model(model, tokenizer, device, args):
             model(samples.to(next(model.parameters()).device))
     except ValueError:  # work with early exit
         pass
-    del samples
+    # del samples
+    
     layers[0] = layers[0].module  # restore
     inps = inps[0]
     layers[0] = layers[0].cpu()
     move_embed(model, "cpu")
-    
     gc.collect()
     torch.cuda.empty_cache()
     bits_alloc = dict()
     ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
-    # import pdb; pdb.set_trace()
+    # token_list = get_static_important_token_per_head(layers, inps, layer_kwargs, args)
+    # inject_token_list_to_layer(model, token_list)
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
         if args.mse_output == "full":
             ori_output = layer(inps, **layer_kwargs)[0]
-        if i !=0 and i != len(layers) - 1:
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
+        # if i !=0 and i != len(layers) - 1:
+        if i == 1:
+            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(
+                model, layers, i, inps, ori_model_outputs, 
+                layer_kwargs, max_window_size, args
+            )
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
@@ -215,3 +222,5 @@ def compute_avg_bits(bits_alloc: dict, max_window_size: int, sink_window_size: i
 
     overall_avg = sum(all_head_bits) / len(all_head_bits)
     return bits_per_head, avg_bits_per_layer, overall_avg
+
+

@@ -11,6 +11,8 @@ from transformers.generation import GenerationConfig
 from types import MethodType
 from loguru import logger
 from tqdm import tqdm
+from sparse_quant_attn.utils.model_utils import inject_input_ids
+
 
 
 ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
@@ -41,9 +43,12 @@ def decode(tokens_list, tokenizer, raw_text_len):
 
 def generate_sample(model, tokenizer, input_txt):
     input_ids = tokenizer(input_txt)['input_ids']
+    
     raw_text_len = len(input_ids)
     logger.info(f"raw_text_len: {raw_text_len}")
     context_enc = torch.tensor([input_ids]).to(model.device)
+    # import pdb; pdb.set_trace()
+    inject_input_ids(model, context_enc)
     # print(f"Input text: {input_txt}\n")
     outputs = model.generate(context_enc)
     output_text = decode(outputs, tokenizer, raw_text_len)[0]
@@ -82,8 +87,8 @@ def evaluate_gsm8k(model, tokenizer, args):
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
     dataset = load_dataset("gsm8k", "main", download_config=config)
     
-    # test = dataset["test"].select(range(50))
-    test = dataset["test"]
+    test = dataset["test"].select(range(50))
+    # test = dataset["test"]
 
     # sample_output_file = "gsm8k_res.jsonl"
     sample_output_file = args.sample_output_file

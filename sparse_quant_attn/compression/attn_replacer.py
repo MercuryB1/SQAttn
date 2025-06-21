@@ -10,10 +10,24 @@ import matplotlib.pyplot as plt
 
 
 @torch.no_grad()
-def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0):
+def replace_sdpa_for_block(
+    module: nn.Module, 
+    blockidx: int, 
+    args, 
+    bit8_window_sizes=None, 
+    bit4_window_sizes=None, 
+    sink_window_size=0,
+):
     if isinstance(module, Qwen2DecoderLayer):
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
-        attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
+        attn_fn = delayed_sdpa_wrapper(
+            layer=module,
+            layer_idx=blockidx, 
+            args=args, 
+            bit8_window_sizes=bit8_window_sizes, 
+            bit4_window_sizes=bit4_window_sizes, 
+            sink_window_size=sink_window_size, 
+        )
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
         module.self_attn.config = copy.deepcopy(module.self_attn.config)
@@ -21,7 +35,14 @@ def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_s
         module.self_attn.config._attn_implementation = impl_name
 
 
-def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_window_size=0, args=None):
+def delayed_sdpa_wrapper(
+    layer,
+    layer_idx, 
+    bit8_window_sizes=0, 
+    bit4_window_sizes=0, 
+    sink_window_size=0, 
+    args=None,
+):
     # Determine if we should use per-head mask based on input types
     is_per_head = isinstance(bit8_window_sizes, list) or isinstance(bit4_window_sizes, list)
     
@@ -50,7 +71,14 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
         bit8_window_sizes = bit8_window_sizes or 0
         bit4_window_sizes = bit4_window_sizes or 0
 
-    def construct_mix_bit_mask_per_head(seq_len, bit8_window_sizes, bit4_window_sizes, sink_window_size, device='cuda'):
+    def construct_mix_bit_mask_per_head(
+        layer,
+        seq_len, 
+        bit8_window_sizes, 
+        bit4_window_sizes, 
+        sink_window_size, 
+        device='cuda',
+    ):
         """
         返回 shape = (num_heads, L, L) 的 bool mask，True表示可以attend。
         """
@@ -70,6 +98,33 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
         sink_mask = kv_idx < sink_window_size
         fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
 
+        # Add static KV ID mask based on token_list
+        # if layer.self_attn.token_list is not None and layer.self_attn.kv_token_ids is not None:
+        if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "token_list") and hasattr(layer.self_attn, "kv_token_ids"):
+            # Create static KV ID mask for each head
+            static_kv_mask = torch.ones(num_heads, seq_len, seq_len, dtype=torch.bool, device=device)
+            
+            # Get the current KV token IDs
+            kv_token_ids = layer.self_attn.kv_token_ids  # Shape: [batch, seq_len]
+            
+            for head_idx in range(num_heads):
+                if head_idx in layer.self_attn.token_list:
+                    important_token_ids = set(layer.self_attn.token_list[head_idx])
+                    
+                    # For each position in the sequence, check if the token ID is in the important list
+                    # if kv_token_ids
+                    for pos in range(min(seq_len, kv_token_ids.shape[1])):
+                        token_id = kv_token_ids[0, pos].item()  # Assuming single batch for now
+                        if token_id in important_token_ids:
+                            # Allow attention to this position for this head
+                            static_kv_mask[head_idx, :, pos] = True
+                        else:
+                            # Mask out attention to this position for this head
+                            static_kv_mask[head_idx, :, pos] = False
+                    
+                    # Apply the static KV mask to the fp8_mask for this head
+                    fp8_mask[head_idx] = fp8_mask[head_idx] | static_kv_mask[head_idx]
+
         # --- INT4 mask ---
         kv_idx_4bit = kv_idx - seq_len // 2
         bit8_window_mask_4bit = kv_idx_4bit <= (q_idx - bit8_window_sizes)
@@ -82,7 +137,7 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
 
         return final_mask[:, :seq_len // 2, :]  # 每个 head 一张 mask（只保留后半段）
 
-    def construct_mix_bit_mask(seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
+    def construct_mix_bit_mask(layer, seq_len, bit8_window_size, bit4_window_size, sink_window_size, device='cuda'):
         """
         返回 shape = (L, L) 的 mask，True表示可以attend，False表示mask掉。
         """
@@ -94,6 +149,29 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
         bit8_window_mask = kv_idx > (q_idx - bit8_window_size)
         sink_mask = kv_idx < sink_window_size
         fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
+
+        
+        # Add static KV ID mask based on token_list
+        if layer.self_attn.token_list is not None and layer.self_attn.kv_token_ids is not None:
+            # Create static KV ID mask
+            static_kv_mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
+            
+            # Get the current KV token IDs
+            kv_token_ids = layer.self_attn.kv_token_ids  # Shape: [batch, seq_len]
+            
+            # For the non-per-head case, we need to check if any head has this token as important
+            all_important_token_ids = set()
+            for head_idx in layer.self_attn.token_list:
+                all_important_token_ids.update(layer.self_attn.token_list[head_idx])
+            
+            # For each position in the sequence, check if the token ID is in any important list
+            for pos in range(min(seq_len, kv_token_ids.shape[1])):
+                token_id = kv_token_ids[0, pos].item()  # Assuming single batch for now
+                if token_id not in all_important_token_ids:
+                    # Mask out attention to this position
+                    static_kv_mask[:, pos] = False
+            # Apply the static KV mask to the fp8_mask
+            fp8_mask = fp8_mask | static_kv_mask
 
         # --- INT4 右半边 ---
         kv_idx_4bit = kv_idx - seq_len // 2
@@ -161,13 +239,15 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
             # Choose mask construction based on input type
             if is_per_head:
                 mask = construct_mix_bit_mask_per_head(
+                    layer=layer,
                     seq_len=kv_len*2,
                     bit8_window_sizes=bit8_window_sizes,
                     bit4_window_sizes=bit4_window_sizes,
-                    sink_window_size=sink_window_size
+                    sink_window_size=sink_window_size,
                 )
             else:
                 mask = construct_mix_bit_mask(
+                    layer=layer,
                     seq_len=kv_len*2,
                     bit8_window_size=bit8_window_sizes,
                     bit4_window_size=bit4_window_sizes,
@@ -180,7 +260,7 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
                 mask = mask[:, -q_len:, :]
             else:
                 mask = mask[-q_len:, :]
-            
+
             attn_output, attn_weights = sdpa_attention_forward(
                     module, q_bit8_bit8, k_bit8_bit4, v_bit8_bit4, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )

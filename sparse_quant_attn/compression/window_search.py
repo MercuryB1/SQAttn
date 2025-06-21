@@ -47,7 +47,9 @@ def search_bit8_window_size_for_head(layers, layer_idx, head_id, inps, ori_outpu
     return bit8_window_candidate_sizes[-1]
 
 @torch.no_grad()
-def binary_search_bit8_window_size_for_head(model, layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
+def binary_search_bit8_window_size_for_head(
+    model, layers, layer_idx, head_id, inps, ori_outputs, 
+    bit8_window_candidate_sizes, layer_kwargs, args):
     thres_cos = args.bit8_thres_cos
     thres_rmse = args.bit8_thres_rmse
 
@@ -65,9 +67,12 @@ def binary_search_bit8_window_size_for_head(model, layers, layer_idx, head_id, i
         replace_sdpa_for_block(layers[layer_idx], layer_idx, args,
                                bit8_window_sizes=bit8_window_sizes,
                                bit4_window_sizes=bit4_window_sizes,
-                               sink_window_size=32)
-
-        quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
+                               sink_window_size=32,
+                               )
+        if args.mse_output == "full" or args.mse_output == "remain":
+            quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
+        elif args.mse_output == "block":
+            quant_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
         sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
         logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
         if sim >= thres_cos and rmse <= thres_rmse:
@@ -179,7 +184,10 @@ def grid_search_block_window_size_per_head(layer, layer_idx, inps, ori_outputs, 
 
 
 @torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head(model, layers, layer_idx, inps, ori_model_outputs, layer_kwargs, max_window_size, args):
+def grid_search_block_window_size_8bit_only_per_head(
+    model, layers, layer_idx, inps, ori_model_outputs, 
+    layer_kwargs, max_window_size, args
+):
     if args.mse_output == "remain":
         ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
     elif args.mse_output == "block":

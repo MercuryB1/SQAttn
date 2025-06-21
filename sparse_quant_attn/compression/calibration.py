@@ -46,7 +46,8 @@ def get_calib_dataset_gsm8k(tokenizer=None, device="cuda", gsm8k_prompt=None):
     fewshot_prompt = open(gsm8k_prompt).read()
     config = datasets.DownloadConfig(resume_download=True, max_retries=100)
     dataset = load_dataset("gsm8k", "main", download_config=config)
-    dataset = dataset["train"].select(range(10))
+    # dataset = dataset["train"].select(range(10))
+    dataset = dataset["train"].select(range(1))
     texts = []
     for doc in dataset:
         context = doc_to_text(doc, fewshot_prompt)

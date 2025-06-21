@@ -66,3 +66,14 @@ def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
 
 
+def inject_input_ids(model, input_ids):
+    for i, layer in enumerate(model.model.layers):
+        if hasattr(layer, "self_attn"):
+            layer.self_attn.kv_token_ids = input_ids
+
+
+def inject_token_list_to_layer(model, token_list):
+    for i, layer in enumerate(model.model.layers):
+        if hasattr(layer, "self_attn"):
+            layer.self_attn.token_list = token_list[i]
+
