@@ -1,0 +1,3 @@
+[submodule "sparse_quant_attn/models/kimi_audio"]
+	path = sparse_quant_attn/models/kimi_audio
+	url = https://github.com/MoonshotAI/Kimi-Audio.git

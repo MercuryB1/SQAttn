@@ -35,6 +35,7 @@ def compress_model(model, tokenizer, device, args):
     # get input and kwargs to layer 0
     # with_kwargs is only supported in PyTorch 2.0
     # use this Catcher hack for now
+    # inject_input_ids(model, samples)
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -62,6 +63,7 @@ def compress_model(model, tokenizer, device, args):
     move_embed(model, "cpu")
     gc.collect()
     torch.cuda.empty_cache()
+
     bits_alloc = dict()
     ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
     # token_list = get_static_important_token_per_head(layers, inps, layer_kwargs, args)
@@ -69,10 +71,15 @@ def compress_model(model, tokenizer, device, args):
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
+
+        from sparse_quant_attn.utils.model_utils import get_named_linears
+        named_linears = get_named_linears(layer)
+
         if args.mse_output == "full":
             ori_output = layer(inps, **layer_kwargs)[0]
         # if i !=0 and i != len(layers) - 1:
-        if i == 1:
+        if i < 100: # 懒得改后面的缩紧了
+        # if i == 1:
             bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(
                 model, layers, i, inps, ori_model_outputs, 
                 layer_kwargs, max_window_size, args

@@ -41,7 +41,7 @@ def get_static_important_token_per_head(layers, inps, layer_kwargs, args):
     layer_kwargs["output_attentions"] = True
     token_list = dict()
     threshold = 0.001  # softmax阈值
-    freq_threshold = 0.1  # q被attend到的频率阈值（可调）
+    freq_threshold = 0.05  # q被attend到的频率阈值（可调）
     num_batches = inps.shape[0]
     seq_len = inps.shape[1]
     for layer_idx, layer in enumerate(layers):
