@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$jsq:$PYTHONPATH
 
@@ -8,7 +8,7 @@ export PYTHONPATH=$jsq:$PYTHONPATH
 task_name=test
 
 python ${sqattn}/main.py \
---model /mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2 \
+--model kimi_audio \
 --calib_dataset gsm8k \
 --quant \
 --qk_qtype int \

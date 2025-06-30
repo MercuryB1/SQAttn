@@ -7,7 +7,7 @@ from loguru import logger
 from sparse_quant_attn.utils.eval_utils import evaluate 
 from sparse_quant_attn.compression.entrance import compress_model
 from sparse_quant_attn.plot.window_size_alloc import plot_window_size_alloc
-
+from sparse_quant_attn.models.kimi_audio import KimiAudio
 
 def seed_everything(seed: int):
     random.seed(seed)  # Python built-in random module
@@ -26,16 +26,20 @@ def seed_everything(seed: int):
 
 
 def build_model_and_tokenizer(args):
-    config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
-    config.use_cache = False
-    enc = AutoTokenizer.from_pretrained(
-        args.model, use_fast=False, trust_remote_code=True
-    )
-    kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True}
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, config=config, trust_remote_code=True, **kwargs
-    )
-    model.eval()
+    if args.model == "kimi_audio":
+        model = KimiAudio()
+        import pdb; pdb.set_trace()
+    else:
+        config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+        config.use_cache = False
+        enc = AutoTokenizer.from_pretrained(
+            args.model, use_fast=False, trust_remote_code=True
+        )
+        kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True}
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, config=config, trust_remote_code=True, **kwargs
+        )
+        model.eval()
     return model, enc
 
 def main():
