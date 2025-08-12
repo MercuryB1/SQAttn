@@ -11,23 +11,28 @@ from tqdm import tqdm
 from sparse_quant_attn.compression.window_search import grid_search_block_window_size_8bit_only_per_head, grid_search_block_window_size_per_head_v2
 from sparse_quant_attn.compression.kv_manage import get_static_important_token_per_head
 from sparse_quant_attn.utils.model_utils import inject_input_ids, inject_token_list_to_layer
+from sparse_quant_attn.compression.calibration import get_calib_dataset_kimi_audio
 
 
 @torch.no_grad()
-def compress_model(model, tokenizer, device, args):
+def compress_model(model, tokenizer, device, args, is_audio=False):
     layers = get_blocks(model)
 
-    logger.info(f"loading calibdation data: {args.calib_dataset}")
-    samples, padding_mask = get_calib_dataset(
-        data=args.calib_dataset,
-        tokenizer=tokenizer,
-        n_samples=args.nsamples,
-        seq_len=args.seqlen,
-        device=device,
-        args=args
-    )
+    logger.info(f"loading calibration data: {args.calib_dataset}")
+    if is_audio:
+        samples, padding_mask = get_calib_dataset_kimi_audio(args.calib_dataset, tokenizer, device, args)
+    else:
+        samples, padding_mask = get_calib_dataset(
+            data=args.calib_dataset,
+            tokenizer=tokenizer,
+            n_samples=args.nsamples,
+            seq_len=args.seqlen,
+            device=device,
+            args=args
+        )
     logger.info("dataset loading complete")
-    max_window_size = samples.shape[1]
+    if not is_audio:
+        max_window_size = samples.shape[1]
     inps = []
     layer_kwargs = {}
     layers[0] = layers[0].cuda()
@@ -51,21 +56,23 @@ def compress_model(model, tokenizer, device, args):
     try:
         if model.__class__.__name__ == "LlavaLlamaModel":
             model.llm(samples.to(next(model.parameters()).device))
+        elif model.__class__.__name__ == "KimiAudio":
+            model(samples[0])
         else:
             model(samples.to(next(model.parameters()).device))
     except ValueError:  # work with early exit
         pass
     # del samples
-    
     layers[0] = layers[0].module  # restore
     inps = inps[0]
     layers[0] = layers[0].cpu()
-    move_embed(model, "cpu")
+    # move_embed(model, "cpu")
     gc.collect()
     torch.cuda.empty_cache()
 
     bits_alloc = dict()
-    ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
+    if args.mse_output != "block":
+        ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
     # token_list = get_static_important_token_per_head(layers, inps, layer_kwargs, args)
     # inject_token_list_to_layer(model, token_list)
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
@@ -73,25 +80,25 @@ def compress_model(model, tokenizer, device, args):
         layer.cuda()
 
         from sparse_quant_attn.utils.model_utils import get_named_linears
-        named_linears = get_named_linears(layer)
+        # named_linears = get_named_linears(layer)
 
         if args.mse_output == "full":
             ori_output = layer(inps, **layer_kwargs)[0]
         # if i !=0 and i != len(layers) - 1:
-        if i < 100: # 懒得改后面的缩紧了
-        # if i == 1:
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(
-                model, layers, i, inps, ori_model_outputs, 
-                layer_kwargs, max_window_size, args
-            )
-            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
-            bits_alloc[i] = {
-                "bit8": bit8_window_sizes,
-                "bit4": bit4_window_sizes,
-                "sink": 16  # 如需支持 per-layer sink window，可改为 list
-            }
-            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
-        
+        if i < 21: # TODO: hardcode kimi audio的前21层
+            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(
+            #     model, layers, i, inps, ori_model_outputs, 
+            #     layer_kwargs, max_window_size, args
+            # )
+            # # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
+            # bits_alloc[i] = {
+            #     "bit8": bit8_window_sizes,
+            #     "bit4": bit4_window_sizes,
+            #     "sink": 16  # 如需支持 per-layer sink window，可改为 list
+            # }
+            # replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+            
+            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=2048, bit4_window_sizes=0, sink_window_size=16)
         # update output after compression
         if args.mse_output == "full":
             inps = ori_output
@@ -99,10 +106,10 @@ def compress_model(model, tokenizer, device, args):
             inps = layer(inps, **layer_kwargs)[0]
         
         # del input_feat
-        layer.cpu()
+        # layer.cpu()
         torch.cuda.empty_cache()
-    return compute_avg_bits(bits_alloc, max_window_size)
-    # return 0
+    # return compute_avg_bits(bits_alloc, max_window_size)
+    return 0,0,0
 
 
 

@@ -1,0 +1,13 @@
+{
+    "task": "ASR",
+    "dataset": "AISHELL-2",
+    "model": "KimiAudio",
+    "date": "2025-07-01 16:17:26.447563",
+    "performance": {
+        "aishell2_test": {
+            "wer": 4.1,
+            "total": 100
+        }
+    },
+    "eval_method": "qwen2-audio-impl"
+}

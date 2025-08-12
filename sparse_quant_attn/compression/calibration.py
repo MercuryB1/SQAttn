@@ -2,6 +2,11 @@ import torch
 import datasets
 from datasets import load_dataset
 
+def get_calib_dataset_kimi_audio(datasets="AISHELL-1", tokenizer=None, device="cuda", args=None):
+    from sparse_quant_attn.eval.kimi_audio_evalkit.almeval.datasets import build_dataset
+    dataset = build_dataset(datasets)
+    dataset.set_demo_mode()
+    return dataset, None
 
 def get_calib_dataset(data="pileval", tokenizer=None, n_samples=512, seq_len=512, device="cuda", args=None):
     if data == "pileval":

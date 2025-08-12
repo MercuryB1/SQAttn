@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+from sparse_quant_attn.utils.model_utils import get_blocks
 
 @torch.no_grad()
 def search_bit4_window_size_for_head(layers, layer_idx, head_id, inps, ori_outputs, bit8_windows, bit4_window_candidate_sizes, layer_kwargs, args):
@@ -87,6 +88,7 @@ def binary_search_bit8_window_size_for_head(
 @torch.no_grad()
 def model_infer(model, inps, layer_kwargs, args):
     outputs = inps
+    layers = get_blocks(model)
     for layer in model.model.layers:
         layer = layer.cuda()
         outputs = layer(outputs, **layer_kwargs)[0]

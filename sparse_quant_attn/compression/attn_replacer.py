@@ -33,6 +33,23 @@ def replace_sdpa_for_block(
         module.self_attn.config = copy.deepcopy(module.self_attn.config)
         # module.self_attn.config._attn_implementation = impl_name
         module.self_attn.config._attn_implementation = impl_name
+    elif module.__class__.__name__ == "MoonshotDecoderLayer": # Kimi-Audio
+        if hasattr(module.self_attn, "_flash_attention_forward"):
+            if not hasattr(module.self_attn, "_original_attention_forwawrd"):
+                module.self_attn._original_attention_forwawrd = module.self_attn._flash_attention_forward
+            
+            # 创建适配器，将 delayed_sdpa_wrapper 的功能适配到 _flash_attention_forward
+            flash_attention_fn = create_flash_attention_adapter(
+                layer=module,
+                layer_idx=blockidx,
+                args=args,
+                bit8_window_sizes=bit8_window_sizes,
+                bit4_window_sizes=bit4_window_sizes,
+                sink_window_size=sink_window_size,
+            )
+            module.self_attn._flash_attention_forward = flash_attention_fn.__get__(module.self_attn, type(module.self_attn))
+            print(f"Patched MoonshotDecoderLayer {blockidx} with SDPA attention")
+
 
 
 def delayed_sdpa_wrapper(
@@ -99,7 +116,6 @@ def delayed_sdpa_wrapper(
         fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
 
         # Add static KV ID mask based on token_list
-        # if layer.self_attn.token_list is not None and layer.self_attn.kv_token_ids is not None:
         if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "token_list") and hasattr(layer.self_attn, "kv_token_ids"):
             # Create static KV ID mask for each head
             static_kv_mask = torch.ones(num_heads, seq_len, seq_len, dtype=torch.bool, device=device)
@@ -112,7 +128,6 @@ def delayed_sdpa_wrapper(
                     important_token_ids = set(layer.self_attn.token_list[head_idx])
                     
                     # For each position in the sequence, check if the token ID is in the important list
-                    # if kv_token_ids
                     for pos in range(min(seq_len, kv_token_ids.shape[1])):
                         token_id = kv_token_ids[0, pos].item()  # Assuming single batch for now
                         if token_id in important_token_ids:
@@ -150,28 +165,28 @@ def delayed_sdpa_wrapper(
         sink_mask = kv_idx < sink_window_size
         fp8_mask = causal_mask & (sink_mask | bit8_window_mask)
 
-        
+        if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "token_list") and hasattr(layer.self_attn, "kv_token_ids"):
         # Add static KV ID mask based on token_list
-        if layer.self_attn.token_list is not None and layer.self_attn.kv_token_ids is not None:
-            # Create static KV ID mask
-            static_kv_mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
-            
-            # Get the current KV token IDs
-            kv_token_ids = layer.self_attn.kv_token_ids  # Shape: [batch, seq_len]
-            
-            # For the non-per-head case, we need to check if any head has this token as important
-            all_important_token_ids = set()
-            for head_idx in layer.self_attn.token_list:
-                all_important_token_ids.update(layer.self_attn.token_list[head_idx])
-            
-            # For each position in the sequence, check if the token ID is in any important list
-            for pos in range(min(seq_len, kv_token_ids.shape[1])):
-                token_id = kv_token_ids[0, pos].item()  # Assuming single batch for now
-                if token_id not in all_important_token_ids:
-                    # Mask out attention to this position
-                    static_kv_mask[:, pos] = False
-            # Apply the static KV mask to the fp8_mask
-            fp8_mask = fp8_mask | static_kv_mask
+            if layer.self_attn.token_list is not None and layer.self_attn.kv_token_ids is not None:
+                # Create static KV ID mask
+                static_kv_mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
+                
+                # Get the current KV token IDs
+                kv_token_ids = layer.self_attn.kv_token_ids  # Shape: [batch, seq_len]
+                
+                # For the non-per-head case, we need to check if any head has this token as important
+                all_important_token_ids = set()
+                for head_idx in layer.self_attn.token_list:
+                    all_important_token_ids.update(layer.self_attn.token_list[head_idx])
+                
+                # For each position in the sequence, check if the token ID is in any important list
+                for pos in range(min(seq_len, kv_token_ids.shape[1])):
+                    token_id = kv_token_ids[0, pos].item()  # Assuming single batch for now
+                    if token_id not in all_important_token_ids:
+                        # Mask out attention to this position
+                        static_kv_mask[:, pos] = False
+                # Apply the static KV mask to the fp8_mask
+                fp8_mask = fp8_mask | static_kv_mask
 
         # --- INT4 右半边 ---
         kv_idx_4bit = kv_idx - seq_len // 2
@@ -183,11 +198,8 @@ def delayed_sdpa_wrapper(
 
         # --- 组合 ---
         is_bit8_part = kv_idx < seq_len // 2
-        # is_valid_q_part = q_idx < seq_len // 2
-        # final_mask = is_valid_q_part & ((is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask))
         final_mask = (is_bit8_part & fp8_mask) | (~is_bit8_part & int4_mask)
 
-        # return final_mask  # shape = (L, L)，dtype = bool
         return final_mask[:seq_len // 2, :]
 
     def attention_fn(
@@ -264,6 +276,7 @@ def delayed_sdpa_wrapper(
             attn_output, attn_weights = sdpa_attention_forward(
                     module, q_bit8_bit8, k_bit8_bit4, v_bit8_bit4, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )
+            # import pdb; pdb.set_trace()
             return attn_output[:, :q_len, :, :], attn_weights
         
         else:
@@ -303,12 +316,78 @@ def delayed_sdpa_wrapper(
                     plt.title(f'Layer {layer_idx} Head {h}')
                     plt.savefig(f'attn_vis_softmax_max_pool/layer_{layer_idx}/head_{h}.png')
                     plt.close()
-            return sdpa_attention_forward(
+            attn_output, attn_weights = sdpa_attention_forward(
                     module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )
+            # import pdb; pdb.set_trace()
+            return attn_output, attn_weights 
         
     return attention_fn
 
+
+
+def create_flash_attention_adapter(
+    layer,
+    layer_idx, 
+    bit8_window_sizes=0, 
+    bit4_window_sizes=0, 
+    sink_window_size=0, 
+    args=None,
+):
+    """创建适配器，将 delayed_sdpa_wrapper 的功能适配到 _flash_attention_forward 的参数格式"""
+    
+    # 直接使用 delayed_sdpa_wrapper 返回的 attention_fn
+    attention_fn = delayed_sdpa_wrapper(
+        layer=layer,
+        layer_idx=layer_idx,
+        bit8_window_sizes=bit8_window_sizes,
+        bit4_window_sizes=bit4_window_sizes,
+        sink_window_size=sink_window_size,
+        args=args,
+    )
+    
+    def flash_attention_forward(self, query_states, key_states, value_states, padding_mask, query_length, dropout=0.0, softmax_scale=None):
+        try:
+            # 参数转换：从 flash attention 格式转换为 SDPA 格式
+            batch_size, num_heads, seq_len, head_dim = query_states.shape
+            _, num_key_value_heads, _, _ = key_states.shape
+            
+            # 处理GQA
+            if num_key_value_heads < num_heads:
+                repeat_times = num_heads // num_key_value_heads
+                key_states = key_states.repeat_interleave(repeat_times, dim=1)
+                value_states = value_states.repeat_interleave(repeat_times, dim=1)
+            
+            # 转换格式为SDPA格式 (batch, seq_len, num_heads, head_dim)
+            query_sdpa = query_states.transpose(1, 2).contiguous()
+            key_sdpa = key_states.transpose(1, 2).contiguous()
+            value_sdpa = value_states.transpose(1, 2).contiguous()
+            
+            # 处理attention mask
+            attention_mask = padding_mask.unsqueeze(1).unsqueeze(2).bool() if padding_mask is not None else None
+            scaling = softmax_scale if softmax_scale is not None else head_dim ** (-0.5)
+            
+            # 直接调用 attention_fn，复用所有逻辑
+            attn_output, _ = attention_fn(
+                module=self, 
+                q=query_sdpa, 
+                k=key_sdpa, 
+                v=value_sdpa, 
+                attn_mask=attention_mask,
+                dropout=dropout, 
+                scaling=scaling
+            )
+            
+            return attn_output
+            
+        except Exception as e:
+            print(f"Error in flash attention adapter: {e}")
+            if hasattr(self, '_original_attention_forwawrd'):
+                return self._original_attention_forwawrd(query_states, key_states, value_states, padding_mask, query_length, dropout, softmax_scale)
+            else:
+                raise e
+    
+    return flash_attention_forward
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

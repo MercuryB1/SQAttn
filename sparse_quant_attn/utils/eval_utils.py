@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import abc
 import json
 import hashlib
+import argparse
 import collections
 from typing import Iterable
 from abc import abstractmethod
@@ -623,11 +624,27 @@ class LMEvalAdaptor(BaseLM):
         return self.model.generate(
             context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False
         )
-    
 
 
 @torch.no_grad()
 def evaluate(model, tokenizer, args):
+    if model.__class__.__name__ == "KimiAudio":
+        from sparse_quant_attn.utils.model_utils import move_embed
+        from sparse_quant_attn.eval.kimi_audio_evalkit.run_audio import evaluate_kimi_audio
+        kimi_eval_args = argparse.Namespace()
+        kimi_eval_args.work_dir = "./eval_result"
+        kimi_eval_args.world_size = 1
+        kimi_eval_args.reeval = False
+        kimi_eval_args.eval_file = "auto"
+        kimi_eval_args.debug = True
+        kimi_eval_args.eval_method = "default"
+        kimi_eval_args.force_reinfer = False
+        kimi_eval_args.skip_eval = False
+        kimi_eval_args.data = ["AISHELL-2"]
+        kimi_eval_args.rank = 0
+        kimi_eval_args.model = "KimiAudio"
+        evaluate_kimi_audio(model, tokenizer, kimi_eval_args)
+        return
     results = {}
     lm = LMEvalAdaptor(args.model, model, tokenizer, args.batch_size)
     if args.multigpu:

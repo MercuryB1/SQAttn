@@ -34,6 +34,8 @@ def move_embed(model, device):
         model.embed_out = model.embed_out.to(device)
     elif "llavallamamodel" in str(model.__class__).lower():
         model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
+    elif model.__class__.__name__ == "KimiAudio":
+        model.model.alm.model.embed_tokens = model.model.alm.model.embed_tokens.to(device)
     else:
         raise NotImplementedError(type(model))
 
@@ -57,6 +59,8 @@ def get_blocks(model):
         layers = model.gpt_neox.layers
     elif model.__class__.__name__ == "LlavaLlamaModel":
         layers = model.llm.model.layers
+    elif model.__class__.__name__ == "KimiAudio":
+        layers = model.model.alm.model.layers
     else:
         raise NotImplementedError(type(model))
     return layers
