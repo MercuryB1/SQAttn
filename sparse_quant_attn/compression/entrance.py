@@ -23,6 +23,8 @@ def compress_model(model, tokenizer, device, args):
         device=device,
         args=args
     )
+    # import pdb; pdb.set_trace()
+    samples = samples[:, :256]
     logger.info("dataset loading complete")
     max_window_size = samples.shape[1]
     inps = []
@@ -69,14 +71,14 @@ def compress_model(model, tokenizer, device, args):
         if args.mse_output == "full":
             ori_output = layer(inps, **layer_kwargs)[0]
         if i !=0 and i != len(layers) - 1:
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
+            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
-            bits_alloc[i] = {
-                "bit8": bit8_window_sizes,
-                "bit4": bit4_window_sizes,
-                "sink": 16  # 如需支持 per-layer sink window，可改为 list
-            }
-            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+            # bits_alloc[i] = {
+            #     "bit8": bit8_window_sizes,
+            #     "bit4": bit4_window_sizes,
+            #     "sink": 16  # 如需支持 per-layer sink window，可改为 list
+            # }
+            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=0, bit4_window_sizes=0, sink_window_size=16)
         
         # update output after compression
         if args.mse_output == "full":
