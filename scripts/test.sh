@@ -21,8 +21,9 @@ python ${sqattn}/main.py \
 --bit4_thres_rmse 0.25 \
 --plot_window_size_alloc \
 --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
---mse_output full \
+--mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
+--use_token_aware 
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \

@@ -71,11 +71,13 @@ def main():
     parser.add_argument("--plot_window_size_alloc_save_dir", type=str, default=None, help="save path for window size allocation")
     parser.add_argument("--mse_output", choices=["full", "remain", "block"], default="full", help="use full output for window size search")
     parser.add_argument("--gsm8k_prompt", type=str, default="/sparse_quant_attn/eval/gsm8k_prompt.txt", help="prompt for gsm8k")
+    parser.add_argument("--use_token_aware_metrics", action="store_true", help="use new metric")
     args = parser.parse_args()
     seed_everything(args.seed)
         
     logger.info(f"loading llm model {args.model}")
     model, tokenizer = build_model_and_tokenizer(args)
+
 
     device = torch.device("cuda:0")
     # TODO: add device_map for multi-GPUs

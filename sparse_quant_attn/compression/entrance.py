@@ -8,7 +8,13 @@ from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
 from sparse_quant_attn.compression.window_search import model_infer
 import gc
 from tqdm import tqdm
-from sparse_quant_attn.compression.window_search import grid_search_block_window_size_8bit_only_per_head, grid_search_block_window_size_per_head_v2
+from sparse_quant_attn.compression.window_search import (
+    grid_search_block_window_size_8bit_only_per_head,
+    grid_search_block_window_size_per_head_v2,
+    grid_search_block_window_size_8bit_only_per_head_outlier_aware
+) 
+from sparse_quant_attn.compression.outlier_utils import apply_hcs_to_all_heads
+
 
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
@@ -61,6 +67,7 @@ def compress_model(model, tokenizer, device, args):
     gc.collect()
     torch.cuda.empty_cache()
     bits_alloc = dict()
+
     ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
     # import pdb; pdb.set_trace()
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
@@ -69,14 +76,15 @@ def compress_model(model, tokenizer, device, args):
         if args.mse_output == "full":
             ori_output = layer(inps, **layer_kwargs)[0]
         if i !=0 and i != len(layers) - 1:
-            bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
+            head_config = apply_hcs_to_all_heads(model, layer, i, inps, layer_kwargs, args)
+            # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
-            bits_alloc[i] = {
-                "bit8": bit8_window_sizes,
-                "bit4": bit4_window_sizes,
-                "sink": 16  # 如需支持 per-layer sink window，可改为 list
-            }
-            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+            # bits_alloc[i] = {
+            #     "bit8": bit8_window_sizes,
+            #     "bit4": bit4_window_sizes,
+            #     "sink": 16  # 如需支持 per-layer sink window，可改为 list
+            # }
+            # replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
         
         # update output after compression
         if args.mse_output == "full":

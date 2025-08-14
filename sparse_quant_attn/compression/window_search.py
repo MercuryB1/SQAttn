@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
 from loguru import logger
-from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block,replace_sdpa_for_block_with_attn_weights
+import math
+
 
 @torch.no_grad()
 def search_bit4_window_size_for_head(layers, layer_idx, head_id, inps, ori_outputs, bit8_windows, bit4_window_candidate_sizes, layer_kwargs, args):
@@ -227,7 +229,7 @@ def grid_search_block_window_size(layer, layer_idx, inps, ori_outputs, layer_kwa
     bit8_window_candidate_sizes = list(range(16, args.seqlen + 1, 16))
     bit8_thres_cos = 0.9999
     bit8_thres_rmse = 0.05
-    bit4_thres_cos = 0.9999
+    bit4_thres_cos = 0.9999 
     bit4_thres_rmse = 0.01
 
     bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
@@ -268,3 +270,57 @@ def search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_siz
         if sim >= thres_cos and rmse <= thres_rmse:
             return w
     return bit4_window_candidate_sizes[-1]
+
+@torch.no_grad()
+def search_bit8_window_size_for_head_outlier_aware(model, layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
+    thres_cos = args.bit8_thres_cos
+    thres_rmse = args.bit8_thres_rmse
+    for w in bit8_window_candidate_sizes:
+        # 替换指定 head 的注意力 kernel（你要确保 replace_sdpa_for_block 支持 per-head）
+        # Construct a list where only head_id has window size w, others use max_window_size
+        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
+        bit8_window_sizes[head_id] = w
+        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
+        replace_sdpa_for_block_with_attn_weights(layers[layer_idx], layer_idx, 
+                               args,bit8_window_sizes=bit8_window_sizes,bit4_window_sizes=bit4_window_sizes,
+                               sink_window_size=32)
+        quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
+        attn_weights = args.attn_weights
+        head_attn = attn_weights[:, head_id, :, :] # [batch, seq, seq]
+        outlier_indices = identify_outliers(head_attn)
+        import pdb; pdb.set_trace()
+        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
+        # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
+        if sim >= thres_cos and rmse <= thres_rmse:
+            return w
+    return bit8_window_candidate_sizes[-1]
+
+@torch.no_grad()
+def grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, layer_idx, inps, ori_model_outputs, layer_kwargs, max_window_size, args):
+    if args.mse_output == "remain":
+        ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
+    elif args.mse_output == "block":
+        ori_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
+    elif args.mse_output == "full":
+        ori_outputs = ori_model_outputs
+    # logger.info(f"Starting per-head grid search for layer {layer_idx}")
+    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
+    if max_window_size not in bit8_window_candidate_sizes:
+        bit8_window_candidate_sizes.append(max_window_size)
+    
+    # per_head_windows = []
+    bit8_windows = []
+    for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
+        best_w = search_bit8_window_size_for_head_outlier_aware(
+            model, layers, layer_idx, h,
+            inps, ori_outputs, 
+            bit8_window_candidate_sizes,
+            layer_kwargs,
+            args
+        )
+        bit8_windows.append(best_w)
+        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
+        # per_head_windows.append((best_w, 0))  # 目前只支持 8bit，4bit=0
+    return bit8_windows, None  # List[(bit8, bit4)] × num_heads
+
+
