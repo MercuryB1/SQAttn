@@ -16,7 +16,7 @@ class HierarchicalCompressionStrategy:
     2. 4-bit (W_4): 负责经济实用，采用"整体思维"，在性能和压缩率之间做权衡
     """
     
-    def __init__(self, z_threshold: float = 1.5, mhsr_threshold: float = 0.995, 
+    def __init__(self, z_threshold: float = 1, mhsr_threshold: float = 0.995, 
                  ter_threshold: float = 0.95, search_step: int = 8):
         """
         Args:
@@ -33,6 +33,7 @@ class HierarchicalCompressionStrategy:
     def identify_outliers(self, attn_weights: torch.Tensor) -> torch.Tensor:
         """
         预处理：识别枢纽 (Outlier Diagnosis)
+        使用因果感知的归一化 (Causal-Aware Normalization)
         
         Args:
             attn_weights: [batch, heads, seq, seq] 或 [heads, seq, seq]
@@ -48,23 +49,52 @@ class HierarchicalCompressionStrategy:
             # 对heads维度求平均
             attn_weights = attn_weights.mean(dim=0)  # [seq, seq]
         
-        # 计算每个Key被关注的总能量 (列求和)
-        E_key = attn_weights.sum(dim=0)  # [seq]
-        import pdb; pdb.set_trace()
-        # 计算Z-score
-        mu = E_key.mean()
-        sigma = E_key.std()
-        z_scores = (E_key - mu) / (sigma + 1e-8)
+        seq_len = attn_weights.size(0)
+        
+        # 第一步：计算每个Key的"单位曝光能量 (Energy Per Exposure, EPE)"
+        epe_values = []
+        
+        for j in range(seq_len):
+            # 1. 计算列能量总和 (Sum)
+            sum_j = attn_weights[:, j].sum().item()
+            
+            # 2. 计算有效曝光窗口大小 (Effective Window)
+            # 在因果模型中，Key k_j 只能被 Query q_j, q_{j+1}, ..., q_{L-1} 关注
+            n_effective = seq_len - j
+            
+            # 3. 计算单位曝光能量 (EPE)
+            # 为数值稳定性，加上小的epsilon
+            epsilon = 1e-8
+            epe_j = sum_j / (n_effective + epsilon)
+            epe_values.append(epe_j)
+        
+        # 转换为tensor
+        epe_tensor = torch.tensor(epe_values, device=attn_weights.device)
+        
+        # 第二步：在公平的数据上进行Z-score分析
+        mu_epe = epe_tensor.mean()
+        sigma_epe = epe_tensor.std()
+        
+        # 计算因果感知Z-score
+        z_causal = (epe_tensor - mu_epe) / (sigma_epe + 1e-8)
         
         # 识别枢纽
-        outlier_mask = z_scores > self.z_threshold
+        outlier_mask = z_causal > self.z_threshold
         
-        logger.info(f"枢纽识别结果:")
-        logger.info(f"  - 序列长度: {len(E_key)}")
-        logger.info(f"  - 关注度均值: {mu:.4f}")
-        logger.info(f"  - 关注度标准差: {sigma:.4f}")
+        logger.info(f"因果感知枢纽识别结果:")
+        logger.info(f"  - 序列长度: {seq_len}")
+        logger.info(f"  - EPE均值μ: {mu_epe:.6f}")
+        logger.info(f"  - EPE标准差σ: {sigma_epe:.6f}")
+        logger.info(f"  - Z-score阈值: {self.z_threshold}")
         logger.info(f"  - 识别出枢纽数量: {outlier_mask.sum().item()}")
         logger.info(f"  - 枢纽位置: {outlier_mask.nonzero().flatten().tolist()}")
+        
+        # 打印前几个和后几个位置的详细信息
+        logger.info(f"  - 详细EPE信息:")
+        for i in [0, 1, 2, seq_len-3, seq_len-2, seq_len-1]:
+            if 0 <= i < seq_len:
+                effective_window = seq_len - i
+                logger.info(f"    位置{i:3d}: 有效窗口={effective_window:3d}, EPE={epe_values[i]:.6f}, Z-score={z_causal[i].item():.3f}")
         
         return outlier_mask
     

@@ -29,6 +29,7 @@ def compress_model(model, tokenizer, device, args):
         device=device,
         args=args
     )
+    samples = samples[:, :256]
     logger.info("dataset loading complete")
     max_window_size = samples.shape[1]
     inps = []

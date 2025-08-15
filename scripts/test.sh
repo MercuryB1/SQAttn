@@ -7,6 +7,7 @@ export PYTHONPATH=$jsq:$PYTHONPATH
 
 task_name=test
 
+nohup \
 python ${sqattn}/main.py \
 --model /mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2 \
 --calib_dataset gsm8k \
@@ -23,7 +24,8 @@ python ${sqattn}/main.py \
 --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
 --mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
---use_token_aware 
+--use_token_aware \
+> test.log 2>&1 &
 # --tasks wikitext \
 # --batch_size 1 \
 # --dynamic_shape \
