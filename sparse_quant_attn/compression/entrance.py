@@ -24,7 +24,7 @@ def compress_model(model, tokenizer, device, args):
         args=args
     )
     # import pdb; pdb.set_trace()
-    samples = samples[:, :256]
+    samples = samples[:, :32]
     logger.info("dataset loading complete")
     max_window_size = samples.shape[1]
     inps = []

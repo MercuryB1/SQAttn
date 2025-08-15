@@ -216,13 +216,13 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
                     return attn_weight
                 
                 attn_weights = cal_attn_weight(q, k)
-                os.makedirs(f'attn_vis_softmax_256/layer_{layer_idx}', exist_ok=True)
+                os.makedirs(f'attn_vis_softmax_32/layer_{layer_idx}', exist_ok=True)
                 attn_map = attn_weights.detach().to(torch.float32).cpu().mean(dim=0) # [H, Q, K]
                 for h in range(attn_map.shape[0]):
                     plt.imshow(attn_map[h], cmap='coolwarm', aspect='auto')
                     plt.colorbar()
                     plt.title(f'Layer {layer_idx} Head {h}')
-                    plt.savefig(f'attn_vis_softmax_256/layer_{layer_idx}/head_{h}.png')
+                    plt.savefig(f'attn_vis_softmax_32/layer_{layer_idx}/head_{h}.png')
                     plt.close()
             return sdpa_attention_forward(
                     module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
