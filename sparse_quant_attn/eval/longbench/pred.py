@@ -35,8 +35,15 @@ def post_process(response, model_name):
         response = response.split("<eoa>")[0]
     return response
 
-def process_model(model, method):
-    if method == 'sageattn':
+def process_model(model, method, window_sizes=None, args=None):
+    if method == 'ours':
+        from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+        for i in range(len(model.model.layer)):
+            layer = model.model.layers[i]
+            bit8_window_sizes = window_sizes[i]['bit8']
+            bit4_window_sizes = window_sizes[i]['bit4']
+            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+    elif method == 'sageattn':
         # from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
         from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
 
@@ -48,12 +55,12 @@ def process_model(model, method):
     return model
 
 
-def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, model_name, out_path, method, lock):
+def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, model_name, out_path, method, window_sizes=None, args=None, lock=None):
     device = torch.device(f'cuda:{rank}')
     model, tokenizer = load_model_and_tokenizer(model_name, device)
     max_length = model.config.max_position_embeddings - 500
 
-    # model = process_model(model, method)
+    model = process_model(model, method)
 
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)
@@ -134,7 +141,7 @@ def load_model_and_tokenizer(path, device):
     return model, tokenizer
 
 
-def pred_longbench(model_name, e, output_path, method):
+def pred_longbench(model_name, e, output_path, method, window_sizes=None, args=None):
     world_size = torch.cuda.device_count()
     mp.set_start_method('spawn', force=True)
 
@@ -177,7 +184,7 @@ def pred_longbench(model_name, e, output_path, method):
         processes = []
         for rank in range(world_size):
             p = mp.Process(target=get_pred, args=(rank, world_size, data_subsets[rank], \
-                        max_gen, prompt_format, dataset, device, model_name, out_path, method, lock))
+                        max_gen, prompt_format, dataset, device, model_name, out_path, method, window_sizes, args, lock))
             p.start()
             processes.append(p)
         for p in processes:
