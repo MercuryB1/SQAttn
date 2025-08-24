@@ -288,7 +288,6 @@ def search_bit8_window_size_for_head_outlier_aware(model, layers, layer_idx, hea
         attn_weights = args.attn_weights
         head_attn = attn_weights[:, head_id, :, :] # [batch, seq, seq]
         outlier_indices = identify_outliers(head_attn)
-        import pdb; pdb.set_trace()
         sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
         # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
         if sim >= thres_cos and rmse <= thres_rmse:

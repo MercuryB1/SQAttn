@@ -1,15 +1,49 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 sqattn=/mnt/disk3/wzn/SQAttn
-export PYTHONPATH=$jsq:$PYTHONPATH
+export PYTHONPATH=$sqattn:$PYTHONPATH
 
 
 task_name=test
 
-nohup \
+# nohup \
+# python ${sqattn}/main.py \
+# --model /mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2 \
+# --calib_dataset gsm8k \
+# --quant \
+# --qk_qtype int \
+# --v_qtype e4m3 \
+# --eval_ppl \
+# --eval_gsm8k \
+# --bit8_thres_cos 0.996 \
+# --bit8_thres_rmse 0.05 \
+# --bit4_thres_cos 0.998 \
+# --bit4_thres_rmse 0.25 \
+# --plot_window_size_alloc \
+# --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
+# --mse_output block \
+# --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
+# --use_token_aware 
+# > test.log 2>&1 &
+# --tasks wikitext \
+# --batch_size 1 \
+# --dynamic_shape \
+
+
+# python ${jsq}/main.py \
+
+
+# --model /mnt/nvme1/models/llama2/llama2-7b \
+# --pruning_method wanda \
+# --rho 2.1 \
+# --sparsity_ratio 0.5 \
+# --sparsity_type unstructured \
+# --tasks wikitext \
+
+# nohup \
 python ${sqattn}/main.py \
---model /mnt/disk3/hg/hub/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2 \
+--model Qwen/Qwen2.5-0.5B-Instruct \
 --calib_dataset gsm8k \
 --quant \
 --qk_qtype int \
@@ -25,18 +59,5 @@ python ${sqattn}/main.py \
 --mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 --use_token_aware \
-> test.log 2>&1 &
-# --tasks wikitext \
-# --batch_size 1 \
-# --dynamic_shape \
-
-
-# python ${jsq}/main.py \
-
-
-# --model /mnt/nvme1/models/llama2/llama2-7b \
-# --pruning_method wanda \
-# --rho 2.1 \
-# --sparsity_ratio 0.5 \
-# --sparsity_type unstructured \
-# --tasks wikitext \
+--method sageattn
+# > full_attn.log 2>&1 &

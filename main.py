@@ -72,6 +72,7 @@ def main():
     parser.add_argument("--mse_output", choices=["full", "remain", "block"], default="full", help="use full output for window size search")
     parser.add_argument("--gsm8k_prompt", type=str, default="/sparse_quant_attn/eval/gsm8k_prompt.txt", help="prompt for gsm8k")
     parser.add_argument("--use_token_aware_metrics", action="store_true", help="use new metric")
+    parser.add_argument("--method", choices=["sageattn", "ours", "full"], default="ours", help="eval method")
     args = parser.parse_args()
     seed_everything(args.seed)
         

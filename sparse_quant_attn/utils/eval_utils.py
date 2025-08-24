@@ -17,6 +17,7 @@ from typing import Iterable
 from abc import abstractmethod
 import transformers
 
+
 class TruncateFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, threshold):
@@ -628,6 +629,11 @@ class LMEvalAdaptor(BaseLM):
 
 @torch.no_grad()
 def evaluate(model, tokenizer, args):
+    from sparse_quant_attn.eval.longbench.pred import pred_longbench
+    from sparse_quant_attn.eval.longbench.eval import eval_longbench
+    pred_longbench(args.model, True, "/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/longbench", args.method)
+    eval_longbench(True, "/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/longbench", args.model, args.method)
+    exit(0)
     results = {}
     lm = LMEvalAdaptor(args.model, model, tokenizer, args.batch_size)
     if args.multigpu:

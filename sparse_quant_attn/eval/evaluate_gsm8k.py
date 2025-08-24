@@ -7,7 +7,8 @@ import datasets
 from datasets import load_from_disk, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.generation import GenerationConfig
-# from .sageattn_wrapper import QwenSageAttnForward
+# from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
+# from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
 from types import MethodType
 from loguru import logger
 from tqdm import tqdm
@@ -161,7 +162,7 @@ if __name__ == "__main__":
     )
     model.generation_config.do_sample = False
     # for layer in model.model.layers:
-    #     layer.self_attn.forward = MethodType(QwenSageAttnForward, layer.self_attn)
+    #     layer.self_attn.forward = MethodType(Qwen2SageAttnForward, layer.self_attn)
     f_output = jsonlines.Writer(open(args.sample_output_file, "w", encoding="utf-8"))
     tot_length = test.num_rows
     acc_res = []

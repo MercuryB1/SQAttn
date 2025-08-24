@@ -22,9 +22,10 @@ def replace_sdpa_for_block_with_attn_weights(module: nn.Module, blockidx: int, a
 
 
 @torch.no_grad()
-def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0):
+def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0, use_sageattn=False):
     if isinstance(module, Qwen2DecoderLayer):
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
+        
         attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
@@ -427,31 +428,31 @@ def delayed_sdpa_wrapper_with_attn_weights(layer_idx, bit8_window_sizes=0, bit4_
     return attention_fn
 
 def cal_attn_weight(query, key, is_causal=True, attn_mask=None):
-                    key = repeat_kv(key, 6)
-                    query = query.contiguous()
-                    key = key.contiguous()
-                    L, S = query.size(-2), key.size(-2)
-                    scale_factor = 1 / math.sqrt(query.size(-1))
-                    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-                    if is_causal:
-                        assert attn_mask is None
-                        temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
-                        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-                        attn_bias.to(query.dtype)
+    key = repeat_kv(key, 6)
+    query = query.contiguous()
+    key = key.contiguous()
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1))
+    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+    if is_causal:
+        assert attn_mask is None
+        temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        attn_bias.to(query.dtype)
 
-                    if attn_mask is not None:
-                        if attn_mask.dtype == torch.bool:
-                            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-                        else:
-                            attn_bias = attn_mask + attn_bias
-                    attn_weight = query @ key.transpose(-2, -1) * scale_factor
-                    attn_weight += attn_bias
-                    attn_weight = torch.softmax(attn_weight, dim=-1)
-                    # import torch.nn.functional as F
-                    # # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
-                    # attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
-                    # return attn_weight_pool
-                    return attn_weight
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn_bias = attn_mask + attn_bias
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    # import torch.nn.functional as F
+    # # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
+    # attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
+    # return attn_weight_pool
+    return attn_weight
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
