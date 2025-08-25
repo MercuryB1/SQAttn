@@ -45,11 +45,11 @@ def process_model(model, method, window_sizes=None, args=None):
             replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
     elif method == 'sageattn':
         # from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
-        from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
+        # from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
 
         logger.info("use sageattn")
-        for layer in model.model.layers:
-            layer.self_attn.forward = MethodType(Qwen2SageAttnForward, layer.self_attn)
+        # for layer in model.model.layers:
+        #     layer.self_attn.forward = MethodType(Qwen2SageAttnForward, layer.self_attn)
     elif method == 'full':
         logger.info('use full attn')
     return model
