@@ -6,3 +6,4 @@ __pycache__/
 *.jsonl
 *.png
 attn*/
+/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/longbench/pred_e/*
