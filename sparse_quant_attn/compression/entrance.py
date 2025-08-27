@@ -79,21 +79,22 @@ def compress_model(model, tokenizer, device, args):
         if i !=0 and i != len(layers) - 1:
             num_heads = layer.self_attn.config.num_attention_heads
             
-            # get attn weights
-            bit8_window_sizes = [0] * num_heads  # 使用大窗口获取完整attention
-            bit4_window_sizes = [0] * num_heads
-            replace_sdpa_for_block_with_attn_weights(layer, i, args,
-                bit8_window_sizes=bit8_window_sizes,
-                bit4_window_sizes=bit4_window_sizes,
-                sink_window_size=32
-            )
-            _ = layer(inps, **layer_kwargs)[0]
-            layer_attn_weights = args.current_attention
+            # # get attn weights
+            # bit8_window_sizes = [0] * num_heads  # 使用大窗口获取完整attention
+            # bit4_window_sizes = [0] * num_heads
+            # replace_sdpa_for_block_with_attn_weights(layer, i, args,
+            #     bit8_window_sizes=bit8_window_sizes,
+            #     bit4_window_sizes=bit4_window_sizes,
+            #     sink_window_size=32
+            # )
+            # _ = layer(inps, **layer_kwargs)[0]
+            # layer_attn_weights = args.current_attention
 
             # search for best window sizes
-            bit8_window_sizes, bit4_window_sizes= apply_hcs_to_all_heads(model, layer, i, inps, layer_kwargs, args)
+            # bit8_window_sizes, bit4_window_sizes= apply_hcs_to_all_heads(model, layer, i, inps, layer_kwargs, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
+            bit8_window_sizes, bit4_window_sizes = 16, 0
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
                 "bit4": bit4_window_sizes,
@@ -110,8 +111,8 @@ def compress_model(model, tokenizer, device, args):
         # del input_feat
         layer.cpu()
         torch.cuda.empty_cache()
-    return compute_avg_bits(bits_alloc, max_window_size)
-    # return 0
+    # return compute_avg_bits(bits_alloc, max_window_size)
+    return 0
 
 
 

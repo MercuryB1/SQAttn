@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
-from transformers.integrations.sdpa_attention import sdpa_attention_forward
+# from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from sparse_quant_attn.compression.sdpa_attention import sdpa_attention_forward
 import copy
 from sparse_quant_attn.compression.fake_quant import FloatQuantizer, IntegerQuantizer
 import math

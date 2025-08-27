@@ -86,15 +86,16 @@ def main():
     #     device = model.hf_device_map["lm_head"]
     logger.info(f"use device: {device}")
     
-    bits_per_head, avg_bits_per_layer, overall_avg = compress_model(model, tokenizer, device, args)  
+    # bits_per_head, avg_bits_per_layer, overall_avg = compress_model(model, tokenizer, device, args)  
+    # compress_model(model, tokenizer, device, args)
     # import pdb; pdb.set_trace()
-    logger.info(f"avg bits: {overall_avg}")
-    for layer_idx in range(len(avg_bits_per_layer)):
-        logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
-    if args.plot_window_size_alloc:
-        os.makedirs(args.plot_window_size_alloc_save_dir, exist_ok=True)
-        save_path = os.path.join(args.plot_window_size_alloc_save_dir, f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
-        plot_window_size_alloc(bits_per_head, save_path)
+    # logger.info(f"avg bits: {overall_avg}")
+    # for layer_idx in range(len(avg_bits_per_layer)):
+    #     logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
+    # if args.plot_window_size_alloc:
+    #     os.makedirs(args.plot_window_size_alloc_save_dir, exist_ok=True)
+    #     save_path = os.path.join(args.plot_window_size_alloc_save_dir, f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
+    #     plot_window_size_alloc(bits_per_head, save_path)
     logger.info("*"*30)
     model.cuda()
     evaluate(model, tokenizer, args)

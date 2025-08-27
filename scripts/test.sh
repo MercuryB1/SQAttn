@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=6,7
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$sqattn:$PYTHONPATH
 
@@ -45,7 +45,6 @@ task_name=test
 python ${sqattn}/main.py \
 --model Qwen/Qwen2.5-0.5B-Instruct \
 --calib_dataset gsm8k \
---quant \
 --qk_qtype int \
 --v_qtype e4m3 \
 --eval_ppl \
@@ -59,5 +58,5 @@ python ${sqattn}/main.py \
 --mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 --use_token_aware \
---method sageattn
+--method ours
 # > full_attn.log 2>&1 &
