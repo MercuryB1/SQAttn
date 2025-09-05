@@ -87,7 +87,7 @@ def main():
     logger.info(f"use device: {device}")
     
     # bits_per_head, avg_bits_per_layer, overall_avg = compress_model(model, tokenizer, device, args)  
-    # compress_model(model, tokenizer, device, args)
+    compress_model(model, tokenizer, device, args)
     # import pdb; pdb.set_trace()
     # logger.info(f"avg bits: {overall_avg}")
     # for layer_idx in range(len(avg_bits_per_layer)):

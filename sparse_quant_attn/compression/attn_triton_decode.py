@@ -252,10 +252,8 @@ def attn_unified(q, k, v, tensor_layout="HND", output_dtype=torch.float16,
             num_stages=4,
             is_P_fp8_quant=is_P_fp8_quant
         )
-    
+
     o = o[..., :head_dim_og]
-    # if is_decode:
-    #     import pdb; pdb.set_trace()
     return (o, lse) if return_lse else o
 
 
@@ -269,164 +267,93 @@ import time
 import torch
 import itertools
 from contextlib import nullcontext
-import math
-import torch
-import torch.nn.functional as F
 
-def _to_HND(x, layout):
-    return x if layout == "HND" else x.permute(0, 2, 1, 3)
 
-def _from_HND(x, layout):
-    return x if layout == "HND" else x.permute(0, 2, 1, 3)
+def sdpa_reference(q, k, v, tensor_layout="HND", is_causal=True):
+    seq_dim = 1 if tensor_layout == "NHD" else 2
 
-def _build_causal_mask(nq, nk, device, dtype=torch.bool):
-    # 形状 (nq, nk)，True=mask
-    diag = 1 + (nk - nq)
-    return torch.triu(torch.ones((nq, nk), device=device, dtype=dtype), diagonal=diag).to(torch.bool)
+    # 对 k 做去均值
+    km = k.mean(dim=seq_dim, keepdim=True)
+    k = k - km
 
-def _maybe_center_k(K, center_k: bool):
-    # 对每个 head、每个 batch 的序列维做去均值（仅当长度>1）
-    if center_k and K.size(2) > 1:
-        K = K - K.mean(dim=2, keepdim=True)
-    return K
-
-def _expand_kv_to_q_heads(K_all, V_all, Hq: int):
-    """
-    将 (B, Hk, N, D) 的 K/V 扩到 (B, Hq, N, D)，用于计算阶段。
-    返回 expanded_K, expanded_V, repeat_factor
-    """
-    Hk = K_all.size(1)
-    if Hk == Hq:
-        return K_all, V_all, 1
-    assert Hq % Hk == 0, f"GQA要求 Hq 可被 Hk 整除，但得到 Hq={Hq}, Hk={Hk}"
-    rpt = Hq // Hk
-    Kx = K_all.repeat_interleave(rpt, dim=1)
-    Vx = V_all.repeat_interleave(rpt, dim=1)
-    return Kx, Vx, rpt
-
-def sdpa_reference(
-    q, k, v,
-    tensor_layout="HND",
-    is_causal=True,
-    past_k=None, past_v=None,
-    return_cache=False,
-    center_k=True,
-):
-    """
-    支持 GQA 的 SDPA 参考实现。
-    - 输入 q: (B, Hq, Nq, D)，k/v: (B, Hk, Nk_now, D)（layout=HND，NHD 同理）
-    - past_k/past_v: (B, Hk, Nk_past, D)（与 k/v 同 head 数 Hk；缓存按 Hk 存）
-    - 计算阶段将 K/V 扩到 Hq；返回的缓存仍然是 Hk 头。
-    """
-    # 转到 (B,H,N,D)
-    q_t = _to_HND(q, tensor_layout)
-    k_t = _to_HND(k, tensor_layout)
-    v_t = _to_HND(v, tensor_layout)
-
-    # 拼 cache（保持 Hk 头）
-    if past_k is not None:
-        pk = _to_HND(past_k, tensor_layout)
-        pv = _to_HND(past_v, tensor_layout)
-        K_all = torch.cat([pk, k_t], dim=2)  # (B,Hk,Nk,D)
-        V_all = torch.cat([pv, v_t], dim=2)
-    else:
-        K_all, V_all = k_t, v_t
-
-    # 对 K 做去均值（按 Hk）
-    K_all = _maybe_center_k(K_all, center_k=center_k)
-
-    B, Hq, Nq, D = q_t.shape
-    Nk = K_all.size(2)
-
-    # 计算阶段把 K/V 扩到 Hq
-    K_comp, V_comp, _ = _expand_kv_to_q_heads(K_all, V_all, Hq)
-
-    # 因果性
-    attn_mask = None
-    sdp_is_causal = False
-    if is_causal:
-        if Nq == Nk:
-            sdp_is_causal = True
-        else:
-            attn_mask = _build_causal_mask(Nq, Nk, device=q_t.device)
-
-    out = F.scaled_dot_product_attention(
-        q_t, K_comp, V_comp,
-        attn_mask=attn_mask,
-        dropout_p=0.0,
-        is_causal=sdp_is_causal
-    )
-
-    out = _from_HND(out, tensor_layout)
-
-    if return_cache:
-        # 缓存仍然返回 Hk 头版本
-        new_past_k = _from_HND(K_all, tensor_layout)
-        new_past_v = _from_HND(V_all, tensor_layout)
-        return out, new_past_k, new_past_v
-    else:
+    # 调用 PyTorch SDPA
+    if tensor_layout == "HND":
+        # 处理 GQA
+        kv_repeat_n = q.size(1) // k.size(1)
+        q_t = q
+        k_t = k
+        v_t = v
+        if kv_repeat_n > 1:
+            k_t = k_t.repeat(1, kv_repeat_n, 1, 1)
+            v_t = v_t.repeat(1, kv_repeat_n, 1, 1)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q_t, k_t, v_t, attn_mask=None, dropout_p=0.0, is_causal=is_causal
+        )
         return out
+    elif tensor_layout == "NHD":
+        kv_repeat_n = q.size(2) // k.size(2)
+        q_t = q.permute(0, 2, 1, 3)  # (B, N, H, D) -> (B, H, N, D)
+        k_t = k.permute(0, 2, 1, 3)  # (B, kv_len, H_kv, D) -> (B, H_kv, kv_len, D)
+        v_t = v.permute(0, 2, 1, 3)  # (B, kv_len, H_kv, D) -> (B, H_kv, kv_len, D)
+        if kv_repeat_n > 1:
+            k_t = k_t.repeat(1, kv_repeat_n, 1, 1)  # (B, H_kv, kv_len, D) -> (B, H, kv_len, D)
+            v_t = v_t.repeat(1, kv_repeat_n, 1, 1)  # (B, H_kv, kv_len, D) -> (B, H, kv_len, D)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q_t, k_t, v_t, attn_mask=None, dropout_p=0.0, is_causal=is_causal
+        )
+        return out.permute(0, 2, 1, 3)  # (B, H, N, D) -> (B, N, H, D)
+    else:
+        raise ValueError("Unsupported tensor_layout")
 
-
-def naive_attention_reference(
-    q, k, v,
-    tensor_layout="HND",
-    is_causal=True,
-    past_k=None, past_v=None,
-    return_cache=False,
-    center_k=True,
-):
-    """
-    朴素 QK^T 实现，支持 GQA，与 sdpa_reference 对齐：
-      - 缓存按 Hk 存储；计算时把 K/V 扩到 Hq
-      - q 做 1/sqrt(D) 缩放
-      - 矩形因果 mask
-    """
+def naive_attention_reference(q, k, v, tensor_layout="HND", is_causal=True):
     head_dim_og = q.size(-1)
     sm_scale = 1.0 / math.sqrt(head_dim_og)
+    seq_dim = 1 if tensor_layout == "NHD" else 2
 
-    # 到 (B,H,N,D)
-    q_t = _to_HND(q, tensor_layout) * sm_scale
-    k_t = _to_HND(k, tensor_layout)
-    v_t = _to_HND(v, tensor_layout)
+    km = k.mean(dim=seq_dim, keepdim=True)
+    k = k - km
+    q = q * sm_scale
 
-    # 拼 cache（Hk 头）
-    if past_k is not None:
-        pk = _to_HND(past_k, tensor_layout)
-        pv = _to_HND(past_v, tensor_layout)
-        K_all = torch.cat([pk, k_t], dim=2)  # (B,Hk,Nk,D)
-        V_all = torch.cat([pv, v_t], dim=2)
+    if tensor_layout == "NHD":
+        kv_repeat_n = q.size(2) // k.size(2)
+        q_t = q.permute(0, 2, 1, 3)  # (B, N, H, D) -> (B, H, N, D)
+        k_t = k.permute(0, 2, 1, 3)  # (B, kv_len, H_kv, D) -> (B, H_kv, kv_len, D)
+        v_t = v.permute(0, 2, 1, 3)  # (B, kv_len, H_kv, D) -> (B, H_kv, kv_len, D)
+        if kv_repeat_n > 1:
+            k_t = k_t.repeat(1, kv_repeat_n, 1, 1)  # (B, H_kv, kv_len, D) -> (B, H, kv_len, D)
+            v_t = v_t.repeat(1, kv_repeat_n, 1, 1)  # (B, H_kv, kv_len, D) -> (B, H, kv_len, D)
+    elif tensor_layout == "HND":
+        kv_repeat_n = q.size(1) // k.size(1)
+        q_t, k_t, v_t = q, k, v
+        if kv_repeat_n > 1:
+            k_t = k_t.repeat(1, kv_repeat_n, 1, 1)
+            v_t = v_t.repeat(1, kv_repeat_n, 1, 1)
     else:
-        K_all, V_all = k_t, v_t
+        raise ValueError("Unsupported tensor_layout")
 
-    # 去均值（按 Hk）
-    K_all = _maybe_center_k(K_all, center_k=center_k)
+    B, H, qo_len, D = q_t.shape
+    _, _, kv_len, _ = k_t.shape
+    qk = torch.matmul(q_t, k_t.transpose(-1, -2))  # (B, H, qo_len, kv_len)
 
-    B, Hq, Nq, D = q_t.shape
-    Nk = K_all.size(2)
-
-    # 扩到 Hq
-    K_comp, V_comp, _ = _expand_kv_to_q_heads(K_all, V_all, Hq)
-
-    # QK^T (B,Hq,Nq,Nk)
-    qk = torch.matmul(q_t, K_comp.transpose(-1, -2))
-
-    # 因果 mask
     if is_causal:
-        mask = _build_causal_mask(Nq, Nk, device=qk.device)
-        qk = qk.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        # 创建适合 qo_len x kv_len 的因果掩码
+        mask = torch.zeros(qo_len, kv_len, device=q.device, dtype=torch.bool)
+        if qo_len == 1:  # Decode 模式：单个 Query 可以看到所有之前的 KV
+            pass  # 不需要掩码
+        else:  # Prefill 模式：标准的下三角掩码
+            for i in range(qo_len):
+                for j in range(kv_len):
+                    if j > i:  # 只掩盖未来的位置
+                        mask[i, j] = True
+        qk = qk.masked_fill(mask, float('-inf'))
 
     p = torch.softmax(qk, dim=-1)
-    out = torch.matmul(p, V_comp)  # (B,Hq,Nq,D)
+    out = torch.matmul(p, v_t)
 
-    out = _from_HND(out, tensor_layout)
+    if tensor_layout == "NHD":
+        out = out.permute(0, 2, 1, 3)
 
-    if return_cache:
-        new_past_k = _from_HND(K_all, tensor_layout)
-        new_past_v = _from_HND(V_all, tensor_layout)
-        return out, new_past_k, new_past_v
-    else:
-        return out
+    return out
 
 
 def _benchmark(func, warmup, iters, *args, **kwargs):
@@ -545,7 +472,7 @@ def run_suite():
         if Hq % g == 0
     ]
     
-    all_configs =  decode_configs
+    all_configs = test_configs + decode_configs
 
     print(f"Planned runs: {len(all_configs)} (Prefill: {len(test_configs)}, Decode: {len(decode_configs)})")
 

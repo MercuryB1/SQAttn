@@ -3,6 +3,7 @@ import torch.nn as nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 # from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from sparse_quant_attn.compression.sdpa_attention import sdpa_attention_forward
+from sparse_quant_attn.compression.attn_triton_mix_bad import attn_hierarchical_window
 import copy
 from sparse_quant_attn.compression.fake_quant import FloatQuantizer, IntegerQuantizer
 import math
@@ -28,6 +29,19 @@ def replace_sdpa_for_block(module: nn.Module, blockidx: int, args, bit8_window_s
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
         
         attn_fn = delayed_sdpa_wrapper(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
+        impl_name = f"sparsequantattn_{blockidx}"
+        ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
+        module.self_attn.config = copy.deepcopy(module.self_attn.config)
+        # module.self_attn.config._attn_implementation = impl_name
+        module.self_attn.config._attn_implementation = impl_name
+
+
+@torch.no_grad()
+def replace_mp_triton_for_block(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0, use_sageattn=False):
+    if isinstance(module, Qwen2DecoderLayer):
+        from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
+        
+        attn_fn = mp_triton_wrapper(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
         module.self_attn.config = copy.deepcopy(module.self_attn.config)
@@ -138,39 +152,42 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
             
             # per token quantization
             if args.qk_qtype == "int":
-                bit8_qk_quantizer = IntegerQuantizer(8, False, "per_token")
-                bit4_qk_quantizer = IntegerQuantizer(4, False, "per_token")
+                bit8_qk_quantizer = IntegerQuantizer(8, True, "per_token")
+                bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
             elif args.qk_qtype == "e4m3":
                 bit8_qk_quantizer = FloatQuantizer("e4m3", True, "per_token")
-                bit4_qk_quantizer = IntegerQuantizer(4, False, "per_token")
+                bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
             elif args.qk_qtype == "e5m2":
                 bit8_qk_quantizer = FloatQuantizer("e5m2", True, "per_token")
-                bit4_qk_quantizer = IntegerQuantizer(4, False, "per_token")
+                bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
             else:
                 raise ValueError(f"Invalid quantization type: {args.qk_qtype}")
             
             if args.v_qtype == "int":
                 bit8_v_quantizer = IntegerQuantizer(8, False, "per_channel")
-                bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
+                # bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
             elif args.v_qtype == "e4m3":
                 bit8_v_quantizer = FloatQuantizer("e4m3", True, "per_channel")
-                bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
+                # bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
             elif args.v_qtype == "e5m2":
                 bit8_v_quantizer = FloatQuantizer("e5m2", True, "per_channel")
-                bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
+                # bit4_v_quantizer = IntegerQuantizer(4, False, "per_channel")
             else:
                 raise ValueError(f"Invalid quantization type: {args.v_qtype}")
 
             q_bit8 = bit8_qk_quantizer.fake_quant_tensor(q)
+            q_bit4 = bit4_qk_quantizer.fake_quant_tensor(q)
             k_bit8 = bit8_qk_quantizer.fake_quant_tensor(k)
             k_bit4 = bit4_qk_quantizer.fake_quant_tensor(k)
             v_bit8 = bit8_v_quantizer.fake_quant_tensor(v)
-            v_bit4 = bit4_v_quantizer.fake_quant_tensor(v)
+            # v_bit4 = bit4_v_quantizer.fake_quant_tensor(v)
 
             # q_bit8_bit8 = torch.cat([q_bit8, q_bit8], dim=2)
             q_bit8_bit8 = q_bit8
+            q_bit8_bit4 = torch.cat([q_bit8, q_bit4], dim=2)
             k_bit8_bit4 = torch.cat([k_bit8, k_bit4], dim=2)
-            v_bit8_bit4 = torch.cat([v_bit8, v_bit4], dim=2)
+            v_bit8_bit8 = torch.cat([v_bit8, v_bit8], dim=2)
+            
             
             # Choose mask construction based on input type
             if is_per_head:
@@ -194,10 +211,14 @@ def delayed_sdpa_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, si
                 mask = mask[:, -q_len:, :]
             else:
                 mask = mask[-q_len:, :]
-            
+
+            # attn_output, attn_weights = sdpa_attention_forward(
+            #         module, q_bit8_bit4, k_bit8_bit4, v_bit8_bit8, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
+            #     )
             attn_output, attn_weights = sdpa_attention_forward(
-                    module, q_bit8_bit8, k_bit8_bit4, v_bit8_bit4, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
+                    module, q_bit8, k_bit8, v_bit8, attention_mask=mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
                 )
+            import pdb; pdb.set_trace()
             return attn_output[:, :q_len, :, :], attn_weights
         else:
             if args.vis_attn:
@@ -466,3 +487,87 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+
+def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_window_size=0, args=None):
+    # Determine if we should use per-head mask based on input types
+    is_per_head = isinstance(bit8_window_sizes, list) or isinstance(bit4_window_sizes, list)
+    
+    if is_per_head:
+        # Get number of heads from the other list
+        if isinstance(bit8_window_sizes, list):
+            num_heads = len(bit8_window_sizes)
+        else:
+            num_heads = len(bit4_window_sizes)
+        
+        # Convert single values to lists for per-head case
+        if isinstance(bit8_window_sizes, int):
+            bit8_window_sizes = [bit8_window_sizes] * num_heads
+        if isinstance(bit4_window_sizes, int):
+            bit4_window_sizes = [bit4_window_sizes] * num_heads
+        if bit8_window_sizes is None:
+            bit8_window_sizes = [0] * num_heads
+        if bit4_window_sizes is None:
+            bit4_window_sizes = [0] * num_heads
+    else:
+        # For single value case, ensure we have single integers
+        if isinstance(bit8_window_sizes, list):
+            bit8_window_sizes = bit8_window_sizes[0] if bit8_window_sizes else 0
+        if isinstance(bit4_window_sizes, list):
+            bit4_window_sizes = bit4_window_sizes[0] if bit4_window_sizes else 0
+        bit8_window_sizes = bit8_window_sizes or 0
+        bit4_window_sizes = bit4_window_sizes or 0
+
+
+    def attention_fn(
+        module, q, k, v, attn_mask,
+        dropout=0.0, scaling=1.0, sliding_window=None, **kwargs
+    ):  
+        if hasattr(module, "num_key_value_groups"):
+            k = repeat_kv(k, module.num_key_value_groups)
+            v = repeat_kv(v, module.num_key_value_groups)
+            
+        km = k.mean(dim=2, keepdim=True)
+        k = k - km
+        # per token quantization
+        if args.qk_qtype == "int":
+            bit8_qk_quantizer = IntegerQuantizer(8, True, "per_token")
+            bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
+        elif args.qk_qtype == "e4m3":
+            bit8_qk_quantizer = FloatQuantizer("e4m3", True, "per_token")
+            bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
+        elif args.qk_qtype == "e5m2":
+            bit8_qk_quantizer = FloatQuantizer("e5m2", True, "per_token")
+            bit4_qk_quantizer = IntegerQuantizer(4, True, "per_token")
+        else:
+            raise ValueError(f"Invalid quantization type: {args.qk_qtype}")
+        
+        if args.v_qtype == "int":
+            bit8_v_quantizer = IntegerQuantizer(8, True, "per_channel")
+        elif args.v_qtype == "e4m3":
+            bit8_v_quantizer = FloatQuantizer("e4m3", True, "per_channel")
+        elif args.v_qtype == "e5m2":
+            bit8_v_quantizer = FloatQuantizer("e5m2", True, "per_channel")
+        else:
+            raise ValueError(f"Invalid quantization type: {args.v_qtype}")
+
+        q_bit8 = bit8_qk_quantizer.fake_quant_tensor(q)
+        q_bit4 = bit4_qk_quantizer.fake_quant_tensor(q)
+        k_bit8 = bit8_qk_quantizer.fake_quant_tensor(k)
+        k_bit4 = bit4_qk_quantizer.fake_quant_tensor(k)
+        v_bit8 = bit8_v_quantizer.fake_quant_tensor(v)
+        # import pdb; pdb.set_trace()   
+        attn_output = attn_hierarchical_window(
+            q_bit8, k_bit8, q_bit4, k_bit4, v_bit8,
+            int8_window_sizes=bit8_window_sizes,
+            int4_window_sizes=bit4_window_sizes,
+            sink_size=sink_window_size,
+            tensor_layout="HND",output_dtype=torch.bfloat16
+        )
+        # import pdb; pdb.set_trace()
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        # import pdb; pdb.set_trace()
+        return attn_output, None
+    
+    return attention_fn

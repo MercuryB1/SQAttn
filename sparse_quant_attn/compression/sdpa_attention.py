@@ -1,6 +1,6 @@
 from typing import Optional, Tuple
 from sparse_quant_attn.compression.attn_triton import attn_causal
-from sparse_quant_attn.compression.attn_triton_test import attn_unified
+from sparse_quant_attn.compression.attn_triton_decode import attn_unified
 from sageattention import sageattn
 import torch
 
@@ -62,12 +62,13 @@ def sdpa_attention_forward(
     #     scale=scaling,
     #     is_causal=is_causal,
     # )
-    
+    # import pdb; pdb.set_trace()
     # attn_output = sageattn(query, key, value, tensor_layout="HND", is_causal=is_causal)
-    # attn_output = attn_causal(query, key, value, tensor_layout="HND", output_dtype=torch.bfloat16)
-    attn_output = attn_unified(query, key, value, tensor_layout="HND", output_dtype=torch.bfloat16)
+    attn_output = attn_causal(query, key, value, tensor_layout="HND", output_dtype=torch.bfloat16)
+    
+    # attn_output = attn_unified(query, key, value, tensor_layout="HND", output_dtype=torch.bfloat16, is_P_fp8_quant=True)
     # if query.shape[2] != key.shape[2]:
-    #     import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, None

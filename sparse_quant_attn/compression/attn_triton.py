@@ -176,7 +176,6 @@ def _attn_fwd(Q, K, V, Out, Lse,
     # 使用掩码确保不加载超出序列长度的无效数据
     q_mask = offs_m[:, None] < qo_len
     q = tl.load(Q_ptrs, mask=q_mask)
-    
     # --- 5. 调用内部循环执行分块计算 ---
     # 这里调用了两次 _attn_fwd_inner，这是一种常见的优化策略，
     # 可能是为了更好地利用指令级并行或处理特定的计算阶段。
@@ -186,11 +185,15 @@ def _attn_fwd(Q, K, V, Out, Lse,
                                     BLOCK_M, HEAD_DIM, BLOCK_N,  
                                     1, offs_m, offs_n, is_P_fp8_quant) # STAGE=1 (4-3=1)
 
-    # 第二次调用处理对角线上的块 (STAGE=2)
+
+    # STAGE=2 
+
+    # 第二次调用处理对角线上的块 (STAGE=3)
     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, kv_len, K_ptrs, V_ptrs, stride_kn, stride_vn,
                                     start_m,  
                                     BLOCK_M, HEAD_DIM, BLOCK_N,  
                                     2, offs_m, offs_n, is_P_fp8_quant) # STAGE=2
+    
     
     # --- 6. 后处理和存储结果 ---
     # 将最终的累加器 acc 除以 softmax 的分母 l_i，得到最终的输出 O
@@ -205,6 +208,7 @@ def _attn_fwd(Q, K, V, Out, Lse,
         # 这里用的是 log2，所以是 m_i + log2(l_i)
         l_i = tl.log2(l_i) + m_i
         tl.store(lse_ptrs, l_i, mask=(offs_m < qo_len))
+
 
 def attn_causal(q, k, v, tensor_layout="HND", output_dtype=torch.float16, return_lse=False, is_P_fp8_quant=False):
     """
@@ -235,8 +239,9 @@ def attn_causal(q, k, v, tensor_layout="HND", output_dtype=torch.float16, return
 
     # --- 2. 计算 sm_scale 并应用到 Q ---
     # 这是一个有趣的优化：对 K 进行中心化 (减去均值)，可以改善数值稳定性
-    km = k.mean(dim=seq_dim, keepdim=True)
-    k = k - km
+    # import pdb; pdb.set_trace()
+    # km = k.mean(dim=seq_dim, keepdim=True)
+    # k = k - km
     
     # 标准的 attention 缩放因子
     sm_scale = 1.0 / (head_dim_og ** 0.5)
@@ -244,7 +249,7 @@ def attn_causal(q, k, v, tensor_layout="HND", output_dtype=torch.float16, return
     sm_scale *= 1.44269504 
     # 将缩放因子预先乘到 q 上，这样在 kernel 中就不用再做乘法了
     q = q * sm_scale
-
+    # import pdb; pdb.set_trace()
     # --- 3. 配置 Triton Kernel 参数 ---
     BLOCK_M = 128
     BLOCK_N = 64
@@ -309,7 +314,7 @@ def attn_causal(q, k, v, tensor_layout="HND", output_dtype=torch.float16, return
         num_stages=4,
         is_P_fp8_quant=is_P_fp8_quant
     )
-
+    import pdb; pdb.set_trace()
     # --- 6. 后处理 ---
     # 如果之前对 head_dim 进行了填充，这里需要裁剪掉填充的部分，返回原始维度的输出
     o = o[..., :head_dim_og]

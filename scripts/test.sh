@@ -48,7 +48,7 @@ python ${sqattn}/main.py \
 --qk_qtype int \
 --v_qtype e4m3 \
 --eval_ppl \
---eval_gsm8k \
+--quant \
 --bit8_thres_cos 0.996 \
 --bit8_thres_rmse 0.05 \
 --bit4_thres_cos 0.998 \
@@ -58,5 +58,5 @@ python ${sqattn}/main.py \
 --mse_output block \
 --gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 --use_token_aware \
---method ours
+--method ours 
 # > full_attn.log 2>&1 &

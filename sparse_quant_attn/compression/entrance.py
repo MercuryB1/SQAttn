@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed
 from sparse_quant_attn.compression.calibration import get_calib_dataset
-from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block, replace_sdpa_for_block_with_attn_weights
+from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block, replace_sdpa_for_block_with_attn_weights, replace_mp_triton_for_block
 from sparse_quant_attn.compression.window_search import model_infer
 import gc
 from tqdm import tqdm
@@ -29,7 +29,7 @@ def compress_model(model, tokenizer, device, args):
         device=device,
         args=args
     )
-    samples = samples[:, :32]
+    samples = samples[:, :512]
     logger.info("dataset loading complete")
     max_window_size = samples.shape[1]
     inps = []
@@ -94,13 +94,18 @@ def compress_model(model, tokenizer, device, args):
             # bit8_window_sizes, bit4_window_sizes= apply_hcs_to_all_heads(model, layer, i, inps, layer_kwargs, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
-            bit8_window_sizes, bit4_window_sizes = 16, 0
+            bit8_window_sizes, bit4_window_sizes = 128, 256
             bits_alloc[i] = {
                 "bit8": bit8_window_sizes,
                 "bit4": bit4_window_sizes,
                 "sink": 16  # 如需支持 per-layer sink window，可改为 list
             }
-            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+            # replace_sdpa_for_block(layer, i, args,
+            #     bit8_window_sizes=bit8_window_sizes,
+            #     bit4_window_sizes=bit4_window_sizes,
+            #     sink_window_size=128
+            # )
+            replace_mp_triton_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=128)
         
         # update output after compression
         if args.mse_output == "full":
