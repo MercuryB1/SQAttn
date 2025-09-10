@@ -3,6 +3,7 @@ from transformers.models.opt import OPTForCausalLM
 from transformers.models.bloom import BloomForCausalLM
 from transformers.models.llama import LlamaForCausalLM
 from transformers.models.qwen2 import Qwen2ForCausalLM
+import torch
 
 
 def move_embed(model, device):
@@ -64,5 +65,16 @@ def get_blocks(model):
 
 def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
+
+@torch.no_grad()
+def batch_layer_infer(layer, batch_inps, batch_layer_kwargs, args):
+    assert len(batch_inps) == len(batch_layer_kwargs)
+    batch_oups = []
+    for i in range(len(batch_inps)):
+        inps = batch_inps[i]
+        layer_kwargs = batch_layer_kwargs[i]
+        oups = layer(inps, **layer_kwargs)[0]
+        batch_oups.append(oups)
+    return batch_oups
 
 

@@ -5,7 +5,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from loguru import logger
 from sparse_quant_attn.utils.eval_utils import evaluate 
-from sparse_quant_attn.compression.entrance import compress_model
+# from sparse_quant_attn.compression.entrance import compress_model
+from sparse_quant_attn.compression.compress import compress_model
 from sparse_quant_attn.plot.window_size_alloc import plot_window_size_alloc
 
 
@@ -44,7 +45,7 @@ def main():
     parser.add_argument("--model", type=str, help="model name or model path")
     parser.add_argument("--save_dir", default=None, type=str, help="direction for saving fake quantization model")
     parser.add_argument("--calib_dataset",type=str,default="pileval",
-        choices=["wikitext2", "ptb", "c4", "mix","pileval", "gsm8k"],
+        choices=["wikitext2", "ptb", "c4", "mix","pileval", "gsm8k", "longbench"],
         help="Where to extract calibration data from.",
     )
     parser.add_argument("--nsamples", type=int, default=128, help="Number of calibration data samples.")

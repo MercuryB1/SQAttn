@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=7
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$sqattn:$PYTHONPATH
 
@@ -44,14 +44,14 @@ task_name=test
 # nohup \
 python ${sqattn}/main.py \
 --model Qwen/Qwen2.5-0.5B-Instruct \
---calib_dataset gsm8k \
+--calib_dataset longbench \
 --qk_qtype int \
 --v_qtype e4m3 \
 --eval_ppl \
 --quant \
---bit8_thres_cos 0.996 \
+--bit8_thres_cos 0.95 \
 --bit8_thres_rmse 0.05 \
---bit4_thres_cos 0.998 \
+--bit4_thres_cos 0.98 \
 --bit4_thres_rmse 0.25 \
 --plot_window_size_alloc \
 --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \

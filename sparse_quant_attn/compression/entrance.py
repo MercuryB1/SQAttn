@@ -23,6 +23,7 @@ def compress_model(model, tokenizer, device, args):
     logger.info(f"loading calibdation data: {args.calib_dataset}")
     samples, padding_mask = get_calib_dataset(
         data=args.calib_dataset,
+        model=model,
         tokenizer=tokenizer,
         n_samples=args.nsamples,
         seq_len=args.seqlen,
