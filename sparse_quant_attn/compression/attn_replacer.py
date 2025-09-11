@@ -4,11 +4,16 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 # from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from sparse_quant_attn.compression.sdpa_attention import sdpa_attention_forward
 from sparse_quant_attn.compression.attn_triton_mix_bad import attn_hierarchical_window
+from sparse_quant_attn.compression.attn_triton_mix_relative import attn_hierarchical_relative_window
 import copy
 from sparse_quant_attn.compression.fake_quant import FloatQuantizer, IntegerQuantizer
 import math
 import os
+import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import torch.nn.functional as F
 
 
 @torch.no_grad()
@@ -305,10 +310,8 @@ def cal_attn_weight(module, query, key, is_causal=True, attn_mask=None):
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
-    # import torch.nn.functional as F
-    # # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
-    # attn_weight_pool=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
-    # return attn_weight_pool
+    # attn_weight_pool=F.avg_pool2d(attn_weight, kernel_size=(10,10),stride=(10,10))
+    # attn_weight=F.max_pool2d(attn_weight, (10,10), stride=(10,10))
     return attn_weight
 
 
@@ -362,7 +365,7 @@ def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_
         if hasattr(module, "num_key_value_groups"):
             k = repeat_kv(k, module.num_key_value_groups)
             v = repeat_kv(v, module.num_key_value_groups)
-            
+        
         km = k.mean(dim=2, keepdim=True)
         k = k - km
         # per token quantization
@@ -392,14 +395,70 @@ def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_
         k_bit8 = bit8_qk_quantizer.fake_quant_tensor(k)
         k_bit4 = bit4_qk_quantizer.fake_quant_tensor(k)
         v_bit8 = bit8_v_quantizer.fake_quant_tensor(v)
+        seq_len = q.shape[2]
+        if seq_len == 1:
+            k_len = k.shape[2]
+        
+            # 重新组合k张量
+            # 假设k的形状是 [batch_size, num_heads, seq_len, head_dim]
+            batch_size, num_heads, _, head_dim = k.shape
+            
+            # 创建新的k张量，初始化为0
+            k_reconstructed = torch.zeros_like(k)
+            
+            # 遍历每个head
+            for head_idx in range(num_heads):
+                # 从bit8_windows和bit4_windows获取当前head对应的窗口配置
+                if head_idx < len(bit8_window_sizes):
+                    bit8_window = bit8_window_sizes[head_idx]
+                else:
+                    bit8_window = 0
+                    
+                if head_idx < len(bit4_window_sizes):
+                    bit4_window = bit4_window_sizes[head_idx]
+                else:
+                    bit4_window = 0
+                
+                # sink窗口位置(前sink_window_size个位置用8bit)
+                sink_end = min(sink_window_size, k_len)
+                if sink_end > 0:
+                    k_reconstructed[:, head_idx, :sink_end, :] = k_bit8[:, head_idx, :sink_end, :]
+                
+                # bit8窗口
+                if bit8_window > 0:
+                    bit8_start = sink_end
+                    bit8_end = min(bit8_start + bit8_window, k_len)
+                    if bit8_end > bit8_start:
+                        k_reconstructed[:, head_idx, bit8_start:bit8_end, :] = k_bit8[:, head_idx, bit8_start:bit8_end, :]
+                
+                # bit4窗口
+                if bit4_window > 0:
+                    bit4_start = sink_end + bit8_window
+                    bit4_end = min(bit4_start + bit4_window, k_len)
+                    if bit4_end > bit4_start:
+                        k_reconstructed[:, head_idx, bit4_start:bit4_end, :] = k_bit4[:, head_idx, bit4_start:bit4_end, :]
+                
+                # 剩余位置保持为0 (已经在初始化时设置)
+            return sdpa_attention_forward(
+                        module, q, k, v, attention_mask=attn_mask, dropout=dropout, scaling=scaling, sliding_window=sliding_window, **kwargs
+                    )
         # import pdb; pdb.set_trace()   
-        attn_output = attn_hierarchical_window(
-            q_bit8, k_bit8, q_bit4, k_bit4, v_bit8,
-            int8_window_sizes=bit8_window_sizes,
-            int4_window_sizes=bit4_window_sizes,
-            sink_size=sink_window_size,
-            tensor_layout="HND",output_dtype=torch.bfloat16
-        )
+        if args.use_relative_distance:
+            attn_output = attn_hierarchical_relative_window(
+                q_bit8, k_bit8, q_bit4, k_bit4, v_bit8,
+                int8_window_ratios=bit8_window_sizes,
+                int4_window_ratios=bit4_window_sizes,
+                sink_size=sink_window_size,
+                tensor_layout="HND",output_dtype=torch.bfloat16
+            )
+        else:
+            attn_output = attn_hierarchical_window(
+                q_bit8, k_bit8, q_bit4, k_bit4, v_bit8,
+                int8_window_sizes=bit8_window_sizes,
+                int4_window_sizes=bit4_window_sizes,
+                sink_size=sink_window_size,
+                tensor_layout="HND",output_dtype=torch.bfloat16
+            )
         # import pdb; pdb.set_trace()
         attn_output = attn_output.transpose(1, 2).contiguous()
         # import pdb; pdb.set_trace()

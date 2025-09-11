@@ -1,325 +1,431 @@
 import torch
-import torch.nn.functional as F
-from loguru import logger
-from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block,replace_sdpa_for_block_with_attn_weights
-import math
+import torch.nn as nn
+import numpy as np
+from tqdm import tqdm
+from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block_with_attn_weights
 
 
-@torch.no_grad()
-def search_bit4_window_size_for_head(layers, layer_idx, head_id, inps, ori_outputs, bit8_windows, bit4_window_candidate_sizes, layer_kwargs, args):
-    thres_cos = args.bit4_thres_cos
-    thres_rmse = args.bit4_thres_rmse
-    for w in bit4_window_candidate_sizes:
-        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
-        bit4_window_sizes[head_id] = w
-        replace_sdpa_for_block(
-            layers[layer_idx], layer_idx, args,
-            bit8_window_sizes=bit8_windows,
+# ============= Phase 2: Calibration Functions =============
+
+# too slow, recommend using gpu version
+def compute_attention_histogram(attention_map: np.ndarray, max_len: int):
+    """
+    Compute energy distribution histogram for attention map
+    """
+    histogram = np.zeros(max_len)
+    seq_len = attention_map.shape[0]
+    
+    for i in range(seq_len):
+        for j in range(min(i + 1, seq_len)):
+            distance = i - j + 1
+            if distance < max_len:
+                energy = attention_map[i, j] * distance
+                histogram[distance] += energy
+    return histogram
+
+
+def compute_attention_histogram_gpu(attention_map: torch.Tensor, max_len: int):
+   """
+   Ultra-fast attention histogram computation using torch.bincount
+   
+   Args:
+       attention_map: [seq_len, seq_len] attention weights on GPU
+       max_len: Maximum distance to consider
+   
+   Returns:
+       histogram: Energy distribution histogram as numpy array, padded to max_len
+   """
+   seq_len = attention_map.shape[0]
+   device = attention_map.device
+   
+   # Step 1: Create distance matrix D[i,j] = i - j
+   row_indices = torch.arange(seq_len, device=device).unsqueeze(1)
+   col_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+   distance_matrix = row_indices - col_indices
+   
+   # Step 2: Create weight matrix (using distance as weight: weight = d)
+   weight_matrix = distance_matrix.float()
+   
+   # Step 3: Compute weighted energy matrix E = A * W
+   weighted_energy_matrix = attention_map * weight_matrix
+   
+   # Step 4: Use bincount on lower triangular part
+   tril_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+   distances_flat = distance_matrix[tril_mask]
+   weighted_energies_flat = weighted_energy_matrix[tril_mask]
+   
+   # Compute histogram using bincount, ensure it has length max_len
+   histogram = torch.bincount(
+       distances_flat,
+       weights=weighted_energies_flat,
+       minlength=max_len  # This ensures output has at least max_len elements
+   )
+   
+   # If histogram is longer than max_len, truncate; if shorter, it's already padded with zeros
+   if len(histogram) > max_len:
+       histogram = histogram[:max_len]
+   
+   return histogram.cpu().numpy()
+
+
+def compute_relative_attention_histogram_gpu(
+    attention_map: torch.Tensor, 
+    num_bins: int = 100
+):
+    """
+    Ultra-fast relative attention histogram computation using torch.bincount
+
+    Args:
+        attention_map: [seq_len, seq_len] attention weights on GPU
+        num_bins: Number of bins for relative distance [0, 1] interval
+    
+    Returns:
+        histogram: Energy distribution histogram with relative distance bins
+    """
+    seq_len = attention_map.shape[0]
+    device = attention_map.device
+    
+    # Step 1: Create absolute distance matrix D[i,j] = i - j
+    row_indices = torch.arange(seq_len, device=device).unsqueeze(1)
+    col_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+    distance_matrix = row_indices - col_indices
+    
+    # Risk weight matrix W[i,j] = i - j (using pure distance as weight)
+    weight_matrix = distance_matrix.float()
+    
+    # Step 2: Create relative distance matrix D_rel[i,j] = (i-j) / i
+    # Handle division by zero for i=0
+    row_indices_safe = row_indices.float().clone()
+    row_indices_safe[0] = 1  # Avoid division by zero
+    relative_distance_matrix = distance_matrix.float() / row_indices_safe
+    relative_distance_matrix[0, 0] = 0  # Fix the (0,0) position
+    
+    # Step 3: Create bin index matrix B[i,j] = floor(d_rel * num_bins)
+    # Clamp to [0, num_bins-1] to handle edge cases
+    bin_index_matrix = (relative_distance_matrix * num_bins).floor().long()
+    bin_index_matrix = torch.clamp(bin_index_matrix, 0, num_bins - 1)
+    
+    # Step 4: Compute weighted energy matrix E = A * W
+    weighted_energy_matrix = attention_map * weight_matrix
+    
+    # Step 5: Use bincount on lower triangular part
+    tril_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+    bin_indices_flat = bin_index_matrix[tril_mask]
+    weighted_energies_flat = weighted_energy_matrix[tril_mask]
+    
+    # Compute histogram using bincount
+    histogram = torch.bincount(
+        bin_indices_flat,
+        weights=weighted_energies_flat,
+        minlength=num_bins
+    )
+    
+    return histogram.cpu().numpy()
+
+def find_optimal_relative_window(
+    histogram: np.ndarray, 
+    threshold: float, 
+    num_bins: int = 100
+):
+    """
+    Find optimal relative window size that retains threshold of total energy
+    
+    Args:
+        histogram: Relative distance energy distribution histogram
+        threshold: Energy retention threshold (e.g., 0.95)
+        num_bins: Number of bins used in histogram
+    
+    Returns:
+        Optimal relative window size (float between 0 and 1)
+    """
+    total_energy = np.sum(histogram)
+    if total_energy == 0:
+        return 0.1  # Default to 10% relative window
+    
+    cumulative_energy = 0
+    optimal_bin = 0
+    
+    for bin_idx in range(len(histogram)):
+        cumulative_energy += histogram[bin_idx]
+        if cumulative_energy >= threshold * total_energy:
+            optimal_bin = bin_idx
+            break
+    
+    # Convert bin index to relative distance
+    # Add 1 to include the entire bin range
+    relative_window = (optimal_bin + 1) / num_bins
+    
+    return min(relative_window, 1.0)
+
+def find_optimal_window(histogram: np.ndarray, threshold: float):
+    """
+    Find minimum window size that retains threshold of total energy
+    """
+    total_energy = np.sum(histogram)
+    if total_energy == 0:
+        return 1
+    
+    cumulative_energy = 0
+    for d in range(0, len(histogram), 128):
+        cumulative_energy += sum(histogram[d:d+128])
+        if cumulative_energy >= threshold * total_energy:
+            return d + 128
+    
+    return len(histogram)
+
+
+def calibrate_layer_windows_absolute(layer, layer_idx, samples_inps, samples_layer_kwargs, max_len, args):
+    """
+    Calibrate absolute window sizes for a single layer
+    Returns fixed window sizes as integers
+    """
+    assert len(samples_inps) == len(samples_layer_kwargs)
+    num_heads = layer.self_attn.config.num_attention_heads
+    
+    # Initialize histograms
+    histograms = [np.zeros(max_len) for _ in range(num_heads)]
+    
+    # Process all samples
+    for i in tqdm(range(len(samples_inps)), desc=f"L{layer_idx} absolute calibration"):
+        inps = samples_inps[i]
+        layer_kwargs = samples_layer_kwargs[i]
+        
+        # Get attention weights
+        bit8_window_sizes = [max_len * 2] * num_heads
+        bit4_window_sizes = [0] * num_heads
+        
+        replace_sdpa_for_block_with_attn_weights(
+            layer, i, args,
+            bit8_window_sizes=bit8_window_sizes,
             bit4_window_sizes=bit4_window_sizes,
-            sink_window_size=32,
+            sink_window_size=128
         )
-        # quant_outputs = layer(inps, **layer_kwargs)[0]
-        quant_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"Bit4 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit4_window_candidate_sizes[-1]
-
-
-@torch.no_grad()
-def search_bit8_window_size_for_head(layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
-    thres_cos = args.bit8_thres_cos
-    thres_rmse = args.bit8_thres_rmse
-    for w in bit8_window_candidate_sizes:
-        # 替换指定 head 的注意力 kernel（你要确保 replace_sdpa_for_block 支持 per-head）
-        # Construct a list where only head_id has window size w, others use max_window_size
-        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
-        bit8_window_sizes[head_id] = w
-        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
-        replace_sdpa_for_block(layers[layer_idx], layer_idx, 
-                               args,bit8_window_sizes=bit8_window_sizes,bit4_window_sizes=bit4_window_sizes,
-                               sink_window_size=32)
-        # quant_outputs = layer(inps, **layer_kwargs)[0]
-        quant_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit8_window_candidate_sizes[-1]
-
-@torch.no_grad()
-def binary_search_bit8_window_size_for_head(model, layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
-    thres_cos = args.bit8_thres_cos
-    thres_rmse = args.bit8_thres_rmse
-
-    left, right = 0, len(bit8_window_candidate_sizes) - 1
-    best_w = bit8_window_candidate_sizes[-1]
-
-    while left <= right:
-        mid = (left + right) // 2
-        w = bit8_window_candidate_sizes[mid]
-
-        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
-        bit8_window_sizes[head_id] = w
-        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
-
-        replace_sdpa_for_block(layers[layer_idx], layer_idx, args,
-                               bit8_window_sizes=bit8_window_sizes,
-                               bit4_window_sizes=bit4_window_sizes,
-                               sink_window_size=32)
-
-        quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            best_w = w
-            right = mid - 1  # 尝试更小的 window size
-        else:
-            left = mid + 1  # 增大 window size
-
-    return best_w
-
-
-@torch.no_grad()
-def model_infer(model, inps, layer_kwargs, args):
-    outputs = inps
-    for layer in model.model.layers:
-        layer = layer.cuda()
-        outputs = layer(outputs, **layer_kwargs)[0]
-        # layer = layer.cpu()
-        torch.cuda.empty_cache()
-    model.model.norm = model.model.norm.to(outputs.device)  
-    outputs = model.model.norm(outputs)
-    model.model.norm = model.model.norm.to("cpu")
-    return outputs
-
-
-@torch.no_grad()
-def layers_infer(model, layers, layer_idx, inps, layer_kwargs, args):
-    # Infer through remaining layers starting from layer_idx
-    outputs = inps
-    for i in range(layer_idx, len(layers)):
-        layer = layers[i]
-        layer = layer.cuda()
-        outputs = layer(outputs, **layer_kwargs)[0]
-        # layer = layer.cpu()
-        torch.cuda.empty_cache()
-    model.model.norm = model.model.norm.to(outputs.device)  
-    outputs = model.model.norm(outputs)
-    model.model.norm = model.model.norm.to("cpu")
-    return outputs
-
-@torch.no_grad()
-def grid_search_block_window_size_per_head_v2(layers, layer_idx, inps, layer_kwargs, max_window_size, args):
-    ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
-    # per_head_windows = []
-    bit8_windows = []
-    bit4_windows = []
-    for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        bit8_best_w = search_bit8_window_size_for_head(
-            layers, layer_idx, h,
-            inps, ori_outputs,
-            bit8_window_candidate_sizes,
-            layer_kwargs,
-            args
-        )
-        bit8_windows.append(bit8_best_w)
-        logger.info(f"layer {layer_idx} head {h} bit8 window size: {bit8_best_w}")
-        bit4_window_candidate_sizes = list(range(0, max_window_size - bit8_best_w + 1, 32))
-        if max_window_size - bit8_best_w not in bit4_window_candidate_sizes:
-            bit4_window_candidate_sizes.append(max_window_size - bit8_best_w)
-        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
-        bit8_window_sizes[h] = bit8_best_w
-        bit4_best_w = search_bit4_window_size_for_head(
-            layers, layer_idx, h,
-            inps, ori_outputs,
-            bit8_window_sizes, bit4_window_candidate_sizes,
-            layer_kwargs,
-            args
-        )
-        bit4_windows.append(bit4_best_w)
-        logger.info(f"layer {layer_idx} head {h} bit4 window size: {bit4_best_w}")
-    return bit8_windows, bit4_windows
-
-@torch.no_grad()
-def grid_search_block_window_size_per_head(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
-    # per_head_windows = []
-    bit8_windows = []
-    for h in range(layer.self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        best_w = search_bit8_window_size_for_head(
-            layer, layer_idx, h,
-            inps, ori_outputs,
-            bit8_window_candidate_sizes,
-            layer_kwargs,
-            args
-        )
-        bit8_windows.append(best_w)
-        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
-    bit4_windows = []
+        
+        _ = layer(inps, **layer_kwargs)[0]
+        attention_maps = args.current_attention.detach()
+        
+        # Accumulate energy for each head
+        for head_idx, attn_map in enumerate(attention_maps.squeeze(0)):
+            if attn_map is not None:
+                hist = compute_attention_histogram_gpu(attn_map, max_len)
+                histograms[head_idx] += hist
     
-    for h in range(layer.self_attn.config.num_attention_heads):
-        bit4_window_candidate_sizes = list(range(32, max_window_size - bit8_windows[h] + 1, 32))
-        if max_window_size - bit8_windows[h] not in bit4_window_candidate_sizes:
-            bit4_window_candidate_sizes.append(max_window_size - bit8_windows[h])
-        best_w = search_bit4_window_size_for_head(
-            layer, layer_idx, h,
-            inps, ori_outputs,
-            bit8_windows, bit4_window_candidate_sizes,
-            layer_kwargs,
-            args
-        )
-        bit4_windows.append(best_w)
-        logger.info(f"layer {layer_idx} head {h} bit4 window size: {best_w}")
-    return bit8_windows, bit4_windows
-
-
-@torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head(model, layers, layer_idx, inps, ori_model_outputs, layer_kwargs, max_window_size, args):
-    if args.mse_output == "remain":
-        ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-    elif args.mse_output == "block":
-        ori_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
-    elif args.mse_output == "full":
-        ori_outputs = ori_model_outputs
-    # logger.info(f"Starting per-head grid search for layer {layer_idx}")
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
+    # Find optimal windows for each head
+    windows = []
+    for head_idx, histogram in enumerate(histograms):
+        bit8_window = find_optimal_window(histogram, args.bit8_thres)
+        bit4_window = find_optimal_window(histogram, args.bit4_thres)
+        
+        windows.append({
+            'head_idx': head_idx,
+            'bit8': bit8_window,
+            'bit4': bit4_window
+        })
     
-    # per_head_windows = []
-    bit8_windows = []
-    for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        best_w = binary_search_bit8_window_size_for_head(
-            model, layers, layer_idx, h,
-            inps, ori_outputs, 
-            bit8_window_candidate_sizes,
-            layer_kwargs,
-            args
-        )
-        bit8_windows.append(best_w)
-        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
-        # per_head_windows.append((best_w, 0))  # 目前只支持 8bit，4bit=0
-    return bit8_windows, None  # List[(bit8, bit4)] × num_heads
-
-
-@torch.no_grad()
-def grid_search_block_window_size_8bit_only(layer, layer_idx, inps, ori_outputs, layer_kwargs, max_window_size, args):
-    logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
-    # bit8_window_candidate_sizes = list(range(128, args.seqlen + 1, 128))
-    # Evenly distribute candidate sizes up to max_window_size
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
-    bit8_thres_cos = args.bit8_thres_cos
-    bit8_thres_rmse = args.bit8_thres_rmse
-    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
-    return bit8_window_size, 0
-
-@torch.no_grad()
-def grid_search_block_window_size(layer, layer_idx, inps, ori_outputs, layer_kwargs, args):
-
-    logger.info(f"Starting grid search for optimal window sizes for layer {layer_idx}")
-    bit8_window_candidate_sizes = list(range(16, args.seqlen + 1, 16))
-    bit8_thres_cos = 0.9999
-    bit8_thres_rmse = 0.05
-    bit4_thres_cos = 0.9999 
-    bit4_thres_rmse = 0.01
-
-    bit8_window_size = search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, bit8_thres_cos, bit8_thres_rmse, layer_kwargs, args)
-    bit4_window_candidate_sizes = bit8_window_candidate_sizes[:(args.seqlen-bit8_window_size)//16]
-    bit4_window_size = search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, bit4_thres_cos, bit4_thres_rmse, layer_kwargs, args)
-    logger.info(f"Best bit8 window size: {bit8_window_size}, best bit4 window size: {bit4_window_size}")
-
-    return bit8_window_size, bit4_window_size
-
+    # Return max windows for layer
+    bit8_max = max(w['bit8'] for w in windows)
+    bit4_max = max(w['bit4'] for w in windows)
     
-def compute_cos_rmse(a: torch.Tensor, b: torch.Tensor):
-    a = a.view(-1).float()
-    b = b.view(-1).float()
-    cos_sim = F.cosine_similarity(a, b, dim=0).item()
-    rmse = torch.sqrt(F.mse_loss(a, b)).item()
-    return cos_sim, rmse
-
-@torch.no_grad()
-def search_bit8_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
-    for w in bit8_window_candidate_sizes:
-        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=w, bit4_window_size=0, sink_window_size=32)
-        # replace
-        quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"Bit8 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit8_window_candidate_sizes[-1]
+    return bit8_max, bit4_max, windows
 
 
-@torch.no_grad()
-def search_bit4_window_size(layer, layer_idx, inps, ori_outputs, bit8_window_size, bit4_window_candidate_sizes, thres_cos, thres_rmse, layer_kwargs, args):
-    for w in bit4_window_candidate_sizes:
-        replace_sdpa_for_block(layer, layer_idx, args, bit8_window_size=bit8_window_size, bit4_window_size=w, sink_window_size=32)
-        quant_outputs = layer(inps, **layer_kwargs)[0]
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"Bit4 window size: {w}, similarity: {sim}, rmse: {rmse}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit4_window_candidate_sizes[-1]
-
-@torch.no_grad()
-def search_bit8_window_size_for_head_outlier_aware(model, layers, layer_idx, head_id, inps, ori_outputs, bit8_window_candidate_sizes, layer_kwargs, args):
-    thres_cos = args.bit8_thres_cos
-    thres_rmse = args.bit8_thres_rmse
-    for w in bit8_window_candidate_sizes:
-        # 替换指定 head 的注意力 kernel（你要确保 replace_sdpa_for_block 支持 per-head）
-        # Construct a list where only head_id has window size w, others use max_window_size
-        bit8_window_sizes = [bit8_window_candidate_sizes[-1]] * layers[layer_idx].self_attn.config.num_attention_heads
-        bit8_window_sizes[head_id] = w
-        bit4_window_sizes = [0] * layers[layer_idx].self_attn.config.num_attention_heads
-        replace_sdpa_for_block_with_attn_weights(layers[layer_idx], layer_idx, 
-                               args,bit8_window_sizes=bit8_window_sizes,bit4_window_sizes=bit4_window_sizes,
-                               sink_window_size=32)
-        quant_outputs = layers_infer(model, layers, layer_idx, inps, layer_kwargs, args)
-        attn_weights = args.attn_weights
-        head_attn = attn_weights[:, head_id, :, :] # [batch, seq, seq]
-        outlier_indices = identify_outliers(head_attn)
-        sim, rmse = compute_cos_rmse(ori_outputs, quant_outputs)
-        # logger.info(f"[Layer {layer_idx} | Head {head_id}] Bit8 window size: {w}, similarity: {sim:.5f}, rmse: {rmse:.5f}")
-        if sim >= thres_cos and rmse <= thres_rmse:
-            return w
-    return bit8_window_candidate_sizes[-1]
-
-@torch.no_grad()
-def grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, layer_idx, inps, ori_model_outputs, layer_kwargs, max_window_size, args):
-    if args.mse_output == "remain":
-        ori_outputs = layers_infer(layers, layer_idx, inps, layer_kwargs, args)
-    elif args.mse_output == "block":
-        ori_outputs = layers[layer_idx](inps, **layer_kwargs)[0]
-    elif args.mse_output == "full":
-        ori_outputs = ori_model_outputs
-    # logger.info(f"Starting per-head grid search for layer {layer_idx}")
-    bit8_window_candidate_sizes = list(range(32, max_window_size + 1, 32))
-    if max_window_size not in bit8_window_candidate_sizes:
-        bit8_window_candidate_sizes.append(max_window_size)
+def calibrate_layer_windows_relative(
+    layer, layer_idx, samples_inps, samples_layer_kwargs, max_len, args
+):
+    """
+    Calibrate relative window sizes excluding sink tokens
+    """
+    assert len(samples_inps) == len(samples_layer_kwargs)
+    num_heads = layer.self_attn.config.num_attention_heads
+    num_bins = getattr(args, 'relative_bins', 200)
+    sink_len = getattr(args, 'sink_window_size', 256)
     
-    # per_head_windows = []
-    bit8_windows = []
-    for h in range(layers[layer_idx].self_attn.config.num_attention_heads):  # 当前模型 num_heads
-        best_w = search_bit8_window_size_for_head_outlier_aware(
-            model, layers, layer_idx, h,
-            inps, ori_outputs, 
-            bit8_window_candidate_sizes,
-            layer_kwargs,
-            args
+    # Initialize histograms
+    histograms = [np.zeros(num_bins) for _ in range(num_heads)]
+    
+    # Process all samples
+    for i in tqdm(range(len(samples_inps)), desc=f"L{layer_idx} relative calibration (sink-aware)"):
+        inps = samples_inps[i]
+        layer_kwargs = samples_layer_kwargs[i]
+        
+        # Get attention weights
+        bit8_window_sizes = [max_len * 2] * num_heads
+        bit4_window_sizes = [0] * num_heads
+        
+        replace_sdpa_for_block_with_attn_weights(
+            layer, i, args,
+            bit8_window_sizes=bit8_window_sizes,
+            bit4_window_sizes=bit4_window_sizes,
+            sink_window_size=sink_len
         )
-        bit8_windows.append(best_w)
-        logger.info(f"layer {layer_idx} head {h} bit8 window size: {best_w}")
-        # per_head_windows.append((best_w, 0))  # 目前只支持 8bit，4bit=0
-    return bit8_windows, None  # List[(bit8, bit4)] × num_heads
+        
+        _ = layer(inps, **layer_kwargs)[0]
+        attention_maps = args.current_attention.detach()
+        
+        # Accumulate energy for each head (excluding sink)
+        for head_idx, attn_map in enumerate(attention_maps.squeeze(0)):
+            if attn_map is not None:
+                hist = compute_relative_attention_histogram_gpu_with_sink(
+                    attn_map, num_bins, sink_len
+                )
+                histograms[head_idx] += hist
+    
+    # Find optimal relative windows
+    windows = []
+    for head_idx, histogram in enumerate(histograms):
+        bit8_relative = find_optimal_relative_window(histogram, args.bit8_thres, num_bins)
+        bit4_relative = find_optimal_relative_window(histogram, args.bit4_thres, num_bins)
+        
+        windows.append({
+            'head_idx': head_idx,
+            'bit8_relative': bit8_relative,
+            'bit4_relative': bit4_relative,
+            'sink_len': sink_len
+        })
+    
+    bit8_max_relative = max(w['bit8_relative'] for w in windows)
+    bit4_max_relative = max(w['bit4_relative'] for w in windows)
+    
+    return bit8_max_relative, bit4_max_relative, windows
 
 
+# Wrapper function to choose which one to use
+def calibrate_layer_windows(layer, layer_idx, samples_inps, samples_layer_kwargs, max_len, args):
+    """
+    Wrapper function that calls appropriate calibration based on args
+    """
+    if getattr(args, 'use_relative_distance', False):
+        return calibrate_layer_windows_relative(
+            layer, layer_idx, samples_inps, samples_layer_kwargs, max_len, args
+        )
+    else:
+        return calibrate_layer_windows_absolute(
+            layer, layer_idx, samples_inps, samples_layer_kwargs, max_len, args
+        )
+
+def compute_relative_attention_histogram_gpu_with_sink(
+    attention_map: torch.Tensor, 
+    num_bins: int = 200,
+    sink_len: int = 128
+):
+    """
+    Ultra-fast relative attention histogram computation excluding sink tokens
+    
+    Args:
+        attention_map: [seq_len, seq_len] attention weights on GPU
+        num_bins: Number of bins for relative distance [0, 1] interval
+        sink_len: Number of sink tokens (default: 128)
+    
+    Returns:
+        histogram: Energy distribution histogram for sliding window world only
+    """
+    seq_len = attention_map.shape[0]
+    device = attention_map.device
+    
+    # Step 0: Create non-sink mask - exclude all attention to sink tokens
+    non_sink_mask = torch.ones_like(attention_map)
+    non_sink_mask[:, :sink_len] = 0
+    
+    # Apply mask to remove sink attention
+    A_masked = attention_map * non_sink_mask
+    
+    # Step 1: Create absolute distance matrix D[i,j] = i - j
+    row_indices = torch.arange(seq_len, device=device).unsqueeze(1)
+    col_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+    distance_matrix_abs = row_indices - col_indices
+    
+    # Step 2: Create relative distance matrix with sink-aware context length
+    # Context length is the sliding window world size: i - sink_len
+    context_len = row_indices.float() - sink_len
+    context_len_safe = torch.clamp(context_len, min=1)  # Avoid division by zero
+    
+    # Relative distance: (i - j) / (i - sink_len)
+    relative_distance_matrix = distance_matrix_abs.float() / context_len_safe
+    
+    # For positions before or at sink boundary, set relative distance to 0
+    relative_distance_matrix[row_indices.squeeze() <= sink_len] = 0
+    
+    # Step 3: Create bin index matrix
+    bin_index_matrix = (relative_distance_matrix * num_bins).floor().long()
+    bin_index_matrix = torch.clamp(bin_index_matrix, 0, num_bins - 1)
+    
+    # Step 4: Risk weight matrix based on relative distance
+    # Risk grows with relative jump in the sliding window world
+    risk_weight_matrix = relative_distance_matrix * num_bins + 1
+    
+    # Step 5: Compute weighted energy matrix using masked attention
+    weighted_energy_matrix = A_masked * risk_weight_matrix
+    
+    # Step 6: Final mask combining lower triangular and non-sink
+    tril_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+    final_mask = tril_mask & non_sink_mask.bool()
+    
+    # Extract valid elements
+    bin_indices_flat = bin_index_matrix[final_mask]
+    weighted_energies_flat = weighted_energy_matrix[final_mask]
+    
+    # Compute histogram using bincount
+    histogram = torch.bincount(
+        bin_indices_flat,
+        weights=weighted_energies_flat,
+        minlength=num_bins
+    )
+    
+    return histogram.cpu().numpy()
+
+
+def compute_absolute_attention_histogram_gpu_with_sink(
+    attention_map: torch.Tensor, 
+    max_len: int,
+    sink_len: int = 128
+):
+    """
+    Compute absolute distance histogram excluding sink tokens
+    
+    Args:
+        attention_map: [seq_len, seq_len] attention weights on GPU
+        max_len: Maximum distance to consider
+        sink_len: Number of sink tokens (default: 128)
+    
+    Returns:
+        histogram: Energy distribution for sliding window world only
+    """
+    seq_len = attention_map.shape[0]
+    device = attention_map.device
+    
+    # Step 0: Create non-sink mask
+    non_sink_mask = torch.ones_like(attention_map)
+    non_sink_mask[:, :sink_len] = 0
+    
+    # Apply mask to remove sink attention
+    A_masked = attention_map * non_sink_mask
+    
+    # Create distance matrix
+    row_indices = torch.arange(seq_len, device=device).unsqueeze(1)
+    col_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+    distance_matrix = row_indices - col_indices
+    
+    # Weight matrix (pure distance)
+    weight_matrix = distance_matrix.float()
+    
+    # Weighted energy
+    weighted_energy_matrix = A_masked * weight_matrix
+    
+    # Final mask: lower triangular AND non-sink
+    tril_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+    final_mask = tril_mask & non_sink_mask.bool()
+    
+    distances_flat = distance_matrix[final_mask]
+    weighted_energies_flat = weighted_energy_matrix[final_mask]
+    
+    # Compute histogram
+    histogram = torch.bincount(
+        distances_flat,
+        weights=weighted_energies_flat,
+        minlength=max_len
+    )
+    
+    if len(histogram) > max_len:
+        histogram = histogram[:max_len]
+    
+    return histogram.cpu().numpy()

@@ -37,14 +37,21 @@ def post_process(response, model_name):
 
 def process_model(model, method, window_sizes=None, args=None):
     if method == 'ours':
-        from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+        # from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
+        from sparse_quant_attn.compression.attn_replacer import replace_mp_triton_for_block
         for i in range(len(model.model.layers)):
             layer = model.model.layers[i]
             # bit8_window_sizes = window_sizes[i]['bit8']
             # bit4_window_sizes = window_sizes[i]['bit4']
-            bit8_window_sizes = None
-            bit4_window_sizes = None
-            replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
+            bit8_window_sizes = 1
+            bit4_window_sizes = 1
+            replace_mp_triton_for_block(
+                layer, i, args,
+                bit8_window_sizes=bit8_window_sizes,
+                bit4_window_sizes=bit4_window_sizes,
+                sink_window_size=256
+            )
+            # replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
     elif method == 'sageattn':
         # from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
         # from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
@@ -56,7 +63,7 @@ def process_model(model, method, window_sizes=None, args=None):
         logger.info('use full attn')
     return model
 
-
+@torch.no_grad()
 def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, model_name, out_path, method, window_sizes=None, args=None, lock=None):
     device = torch.device(f'cuda:{rank}')
     model, tokenizer = load_model_and_tokenizer(model_name, device)
@@ -141,7 +148,7 @@ def load_model_and_tokenizer(path, device):
     model = model.eval()
     return model, tokenizer
 
-
+@torch.no_grad()
 def pred_longbench(model_name, e, output_path, method, window_sizes=None, args=None):
     world_size = torch.cuda.device_count()
     mp.set_start_method('spawn', force=True)

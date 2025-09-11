@@ -5,17 +5,8 @@ from loguru import logger
 from sparse_quant_attn.utils.model_utils import get_blocks, move_embed
 from sparse_quant_attn.compression.calibration import get_calib_dataset
 from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block, replace_sdpa_for_block_with_attn_weights, replace_mp_triton_for_block
-from sparse_quant_attn.compression.window_search import model_infer
 import gc
 from tqdm import tqdm
-from sparse_quant_attn.compression.window_search import (
-    grid_search_block_window_size_8bit_only_per_head,
-    grid_search_block_window_size_per_head_v2,
-    grid_search_block_window_size_8bit_only_per_head_outlier_aware
-) 
-from sparse_quant_attn.compression.outlier_utils import apply_hcs_to_all_heads
-from sparse_quant_attn.compression.ipw_compressor import apply_ipw_compression
-
 @torch.no_grad()
 def compress_model(model, tokenizer, device, args):
     layers = get_blocks(model)
@@ -70,19 +61,16 @@ def compress_model(model, tokenizer, device, args):
     torch.cuda.empty_cache()
     bits_alloc = dict()
 
-    ori_model_outputs = model_infer(model, inps, layer_kwargs, args)
     # import pdb; pdb.set_trace()
     for i in tqdm(range(len(layers)), desc="Running SQAttn..."):
         layer = layers[i]
         layer.cuda()
-        if args.mse_output == "full":
-            ori_output = layer(inps, **layer_kwargs)[0]
         if i !=0 and i != len(layers) - 1:
             num_heads = layer.self_attn.config.num_attention_heads
             
             # # get attn weights
-            # bit8_window_sizes = [0] * num_heads  # 使用大窗口获取完整attention
-            # bit4_window_sizes = [0] * num_heads
+            bit8_window_sizes = [0.0001] * num_heads  # 使用大窗口获取完整attention
+            bit4_window_sizes = [0.0002] * num_heads
             # replace_sdpa_for_block_with_attn_weights(layer, i, args,
             #     bit8_window_sizes=bit8_window_sizes,
             #     bit4_window_sizes=bit4_window_sizes,
@@ -95,12 +83,12 @@ def compress_model(model, tokenizer, device, args):
             # bit8_window_sizes, bit4_window_sizes= apply_hcs_to_all_heads(model, layer, i, inps, layer_kwargs, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_8bit_only_per_head_outlier_aware(model, layers, i, inps, ori_model_outputs, layer_kwargs, max_window_size, args)
             # bit8_window_sizes, bit4_window_sizes = grid_search_block_window_size_per_head_v2(layers, i, inps, layer_kwargs, max_window_size, args)
-            bit8_window_sizes, bit4_window_sizes = 128, 256
-            bits_alloc[i] = {
-                "bit8": bit8_window_sizes,
-                "bit4": bit4_window_sizes,
-                "sink": 16  # 如需支持 per-layer sink window，可改为 list
-            }
+            # bit8_window_sizes, bit4_window_sizes = 128, 256
+            # bits_alloc[i] = {
+            #     "bit8": bit8_window_sizes,
+            #     "bit4": bit4_window_sizes,
+            #     "sink": 16  # 如需支持 per-layer sink window，可改为 list
+            # }
             # replace_sdpa_for_block(layer, i, args,
             #     bit8_window_sizes=bit8_window_sizes,
             #     bit4_window_sizes=bit4_window_sizes,
@@ -109,10 +97,8 @@ def compress_model(model, tokenizer, device, args):
             replace_mp_triton_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=128)
         
         # update output after compression
-        if args.mse_output == "full":
-            inps = ori_output
-        else:
-            inps = layer(inps, **layer_kwargs)[0]
+       
+        inps = layer(inps, **layer_kwargs)[0]
         
         # del input_feat
         layer.cpu()
