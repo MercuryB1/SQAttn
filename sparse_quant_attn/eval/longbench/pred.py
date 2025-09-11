@@ -40,17 +40,19 @@ def process_model(model, method, window_sizes=None, args=None):
         # from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
         from sparse_quant_attn.compression.attn_replacer import replace_mp_triton_for_block
         for i in range(len(model.model.layers)):
-            layer = model.model.layers[i]
+            if i in window_sizes.keys():
+                layer = model.model.layers[i]
             # bit8_window_sizes = window_sizes[i]['bit8']
             # bit4_window_sizes = window_sizes[i]['bit4']
-            bit8_window_sizes = 1
-            bit4_window_sizes = 1
-            replace_mp_triton_for_block(
-                layer, i, args,
-                bit8_window_sizes=bit8_window_sizes,
-                bit4_window_sizes=bit4_window_sizes,
-                sink_window_size=256
-            )
+                bit8_window_sizes = window_sizes[i]['bit8']
+                bit4_window_sizes = window_sizes[i]['bit4']
+                sink_size = window_sizes[i]['sink']
+                replace_mp_triton_for_block(
+                    layer, i, args,
+                    bit8_window_sizes=bit8_window_sizes,
+                    bit4_window_sizes=bit4_window_sizes,
+                    sink_window_size=256
+                )
             # replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
     elif method == 'sageattn':
         # from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
@@ -69,7 +71,7 @@ def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, mo
     model, tokenizer = load_model_and_tokenizer(model_name, device)
     max_length = model.config.max_position_embeddings - 500
 
-    model = process_model(model, method, None, args)
+    model = process_model(model, method, window_sizes, args)
 
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)

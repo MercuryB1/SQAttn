@@ -27,3 +27,14 @@ omegaconf
 qtorch
 seaborn
 matplotlib
+loguru
+jsonlines
+sacrebleu
+scikit-learn
+sqlitedict
+omegaconf
+pycountry
+rouge_score
+qtorch
+matplotlib
+seaborn

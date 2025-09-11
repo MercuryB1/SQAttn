@@ -330,6 +330,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_window_size=0, args=None):
     # Determine if we should use per-head mask based on input types
+
     is_per_head = isinstance(bit8_window_sizes, list) or isinstance(bit4_window_sizes, list)
     
     if is_per_head:
@@ -356,7 +357,6 @@ def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_
             bit4_window_sizes = bit4_window_sizes[0] if bit4_window_sizes else 0
         bit8_window_sizes = bit8_window_sizes or 0
         bit4_window_sizes = bit4_window_sizes or 0
-
 
     def attention_fn(
         module, q, k, v, attn_mask,
@@ -402,41 +402,43 @@ def mp_triton_wrapper(layer_idx, bit8_window_sizes=0, bit4_window_sizes=0, sink_
             # 重新组合k张量
             # 假设k的形状是 [batch_size, num_heads, seq_len, head_dim]
             batch_size, num_heads, _, head_dim = k.shape
-            
             # 创建新的k张量，初始化为0
             k_reconstructed = torch.zeros_like(k)
-            
+
             # 遍历每个head
             for head_idx in range(num_heads):
                 # 从bit8_windows和bit4_windows获取当前head对应的窗口配置
                 if head_idx < len(bit8_window_sizes):
-                    bit8_window = bit8_window_sizes[head_idx]
+                    bit8_window = math.floor(bit8_window_sizes[head_idx] * k_len) if args.use_relative_distance else bit8_window_sizes[head_idx]
                 else:
                     bit8_window = 0
                     
                 if head_idx < len(bit4_window_sizes):
-                    bit4_window = bit4_window_sizes[head_idx]
+                    bit4_window = math.floor(bit4_window_sizes[head_idx] * k_len) if args.use_relative_distance else bit4_window_sizes[head_idx]
                 else:
                     bit4_window = 0
                 
-                # sink窗口位置(前sink_window_size个位置用8bit)
+                 # 第1部分：Sink部分 [0, sink_size] 用8bit
                 sink_end = min(sink_window_size, k_len)
                 if sink_end > 0:
                     k_reconstructed[:, head_idx, :sink_end, :] = k_bit8[:, head_idx, :sink_end, :]
                 
-                # bit8窗口
-                if bit8_window > 0:
-                    bit8_start = sink_end
-                    bit8_end = min(bit8_start + bit8_window, k_len)
-                    if bit8_end > bit8_start:
-                        k_reconstructed[:, head_idx, bit8_start:bit8_end, :] = k_bit8[:, head_idx, bit8_start:bit8_end, :]
+                # 第2部分：0bit部分 [sink_size, k_len-4bit_window-8bit_window] 保持为0
+                # (已经在初始化时设为0，无需操作)
                 
-                # bit4窗口
+                # 第3部分：4bit部分 [k_len-4bit_window-8bit_window, k_len-8bit_window]
                 if bit4_window > 0:
-                    bit4_start = sink_end + bit8_window
-                    bit4_end = min(bit4_start + bit4_window, k_len)
-                    if bit4_end > bit4_start:
+                    bit4_start = max(sink_end, k_len - bit4_window - bit8_window)
+                    bit4_end = k_len - bit8_window
+                    if bit4_end > bit4_start and bit4_start >= 0 and bit4_end <= k_len:
                         k_reconstructed[:, head_idx, bit4_start:bit4_end, :] = k_bit4[:, head_idx, bit4_start:bit4_end, :]
+                
+                # 第4部分：8bit部分 [k_len-8bit_window, k_len] 最新tokens用8bit
+                if bit8_window > 0:
+                    bit8_start = k_len - bit8_window
+                    bit8_end = k_len
+                    if bit8_start >= 0 and bit8_start < bit8_end:
+                        k_reconstructed[:, head_idx, bit8_start:bit8_end, :] = k_bit8[:, head_idx, bit8_start:bit8_end, :]
                 
                 # 剩余位置保持为0 (已经在初始化时设置)
             return sdpa_attention_forward(

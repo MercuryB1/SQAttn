@@ -28,7 +28,7 @@ def sdpa_attention_forward(
     is_causal: Optional[bool] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
-    if hasattr(module, "num_key_value_groups"):
+    if hasattr(module, "num_key_value_groups") and key.shape[1] != query.shape[1]:
         key = repeat_kv(key, module.num_key_value_groups)
         value = repeat_kv(value, module.num_key_value_groups)
 
