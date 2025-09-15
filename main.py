@@ -98,7 +98,6 @@ def main():
     #     save_path = os.path.join(args.plot_window_size_alloc_save_dir, f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
     #     plot_window_size_alloc(bits_per_head, save_path)
     logger.info("*"*30)
-    exit(0)
     model.cuda()
     evaluate(model, tokenizer, bits_alloc, args)
     
