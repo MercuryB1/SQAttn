@@ -244,7 +244,7 @@ def calibrate_layer_windows_relative(
     histograms = [np.zeros(num_bins) for _ in range(num_heads)]
     
     # Process all samples
-    for i in tqdm(range(len(samples_inps)), desc=f"L{layer_idx} relative calibration (sink-aware)"):
+    for i in range(len(samples_inps)):
         inps = samples_inps[i]
         layer_kwargs = samples_layer_kwargs[i]
         

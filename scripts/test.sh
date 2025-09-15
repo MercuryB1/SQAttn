@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=7,8
+export CUDA_VISIBLE_DEVICES=1
 sqattn=/mnt/disk3/wzn/SQAttn
 export PYTHONPATH=$sqattn:$PYTHONPATH
 
@@ -49,11 +49,10 @@ python ${sqattn}/main.py \
 --v_qtype e4m3 \
 --eval_ppl \
 --quant \
---bit8_thres 0.95 \
---bit4_thres 0.98 \
+--bit8_thres 0.75 \
+--bit4_thres 0.80 \
 --plot_window_size_alloc \
 --plot_window_size_alloc_save_dir /mnt/disk3/wzn/SQAttn/results \
---gsm8k_prompt /mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/gsm8k_prompt.txt \
 --use_relative_distance \
 --method ours 
 # > full_attn.log 2>&1 &

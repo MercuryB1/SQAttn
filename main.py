@@ -8,6 +8,7 @@ from sparse_quant_attn.utils.eval_utils import evaluate
 # from sparse_quant_attn.compression.entrance import compress_model
 from sparse_quant_attn.compression.compress import compress_model
 from sparse_quant_attn.plot.window_size_alloc import plot_window_size_alloc
+from sparse_quant_attn.utils.analysis import compute_speed_up
 
 
 def seed_everything(seed: int):
@@ -86,8 +87,10 @@ def main():
     
     # bits_per_head, avg_bits_per_layer, overall_avg = compress_model(model, tokenizer, device, args)  
     bits_alloc = compress_model(model, tokenizer, device, args)
-    # import pdb; pdb.set_trace()
-    # logger.info(f"avg bits: {overall_avg}")
+    logger.info(f"bits_alloc: {bits_alloc}")
+    
+    speedup, average_bits = compute_speed_up(bits_alloc)
+    logger.info(f"speedup is {speedup}, average bits is {average_bits}")
     # for layer_idx in range(len(avg_bits_per_layer)):
     #     logger.info(f"layer {layer_idx} avg bits: {avg_bits_per_layer[layer_idx]}")
     # if args.plot_window_size_alloc:
@@ -95,6 +98,7 @@ def main():
     #     save_path = os.path.join(args.plot_window_size_alloc_save_dir, f"{args.model.split('/')[-1]}_{args.bit8_thres_cos}_{args.bit8_thres_rmse}_{args.bit4_thres_cos}_{args.bit4_thres_rmse}_window_size_alloc.png")
     #     plot_window_size_alloc(bits_per_head, save_path)
     logger.info("*"*30)
+    exit(0)
     model.cuda()
     evaluate(model, tokenizer, bits_alloc, args)
     

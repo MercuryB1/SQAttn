@@ -191,7 +191,7 @@ def compress_model(model, tokenizer, device, args):
                 bit8_windows.append(hw['bit8_relative'])
                 bit4_windows.append(hw['bit4_relative'])
 
-            logger.info(f"L{layer_idx}: bit8={bit8_windows}, bit4={bit4_windows}")
+            # logger.info(f"L{layer_idx}: bit8={bit8_windows}, bit4={bit4_windows}")
             
             # Store configuration
             bits_alloc[layer_idx] = {
