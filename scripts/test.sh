@@ -43,11 +43,12 @@ task_name=test
 
 # nohup \
 python ${sqattn}/main.py \
---model Qwen/Qwen2.5-0.5B-Instruct \
+--model meta-llama/Llama-3.1-8B-Instruct \
 --calib_dataset longbench \
 --qk_qtype int \
 --v_qtype e4m3 \
 --eval_ppl \
+--tasks lambada
 --quant \
 --bit8_thres 0.75 \
 --bit4_thres 0.80 \

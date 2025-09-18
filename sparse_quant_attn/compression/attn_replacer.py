@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 # from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from sparse_quant_attn.compression.sdpa_attention import sdpa_attention_forward
 from sparse_quant_attn.compression.attn_triton_mix_bad import attn_hierarchical_window
@@ -20,6 +21,14 @@ import torch.nn.functional as F
 def replace_sdpa_for_block_with_attn_weights(module: nn.Module, blockidx: int, args, bit8_window_sizes=None, bit4_window_sizes=None, sink_window_size=0):
     if isinstance(module, Qwen2DecoderLayer):
         from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS
+        attn_fn = delayed_sdpa_wrapper_with_attn_weights(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
+        impl_name = f"sparsequantattn_{blockidx}"
+        ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn
+        module.self_attn.config = copy.deepcopy(module.self_attn.config)
+        # module.self_attn.config._attn_implementation = impl_name
+        module.self_attn.config._attn_implementation = impl_name
+    elif isinstance(module, LlamaDecoderLayer):
+        from transformers.models.llama.modeling_llama import ALL_ATTENTION_FUNCTIONS
         attn_fn = delayed_sdpa_wrapper_with_attn_weights(blockidx, args=args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=sink_window_size)
         impl_name = f"sparsequantattn_{blockidx}"
         ALL_ATTENTION_FUNCTIONS[impl_name] = attn_fn

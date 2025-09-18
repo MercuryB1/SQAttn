@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 from sparse_quant_attn.compression.attn_triton import attn_causal
 from sparse_quant_attn.compression.attn_triton_decode import attn_unified
-from sageattention import sageattn
+# from sageattention import sageattn
 import torch
 
 

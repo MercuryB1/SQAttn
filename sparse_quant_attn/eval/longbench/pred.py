@@ -35,8 +35,8 @@ def post_process(response, model_name):
         response = response.split("<eoa>")[0]
     return response
 
-def process_model(model, method, window_sizes=None, args=None):
-    if method == 'ours':
+def process_model(model, window_sizes=None, args=None):
+    if args.method == 'ours':
         # from sparse_quant_attn.compression.attn_replacer import replace_sdpa_for_block
         from sparse_quant_attn.compression.attn_replacer import replace_mp_triton_for_block
         for i in range(len(model.model.layers)):
@@ -54,24 +54,24 @@ def process_model(model, method, window_sizes=None, args=None):
                     sink_window_size=256
                 )
             # replace_sdpa_for_block(layer, i, args, bit8_window_sizes=bit8_window_sizes, bit4_window_sizes=bit4_window_sizes, sink_window_size=16)
-    elif method == 'sageattn':
+    elif args.method == 'sageattn':
         # from sparse_quant_attn.eval.sageattn_wrapper import QwenSageAttnForward
         # from sparse_quant_attn.utils.qwen_sageattn import Qwen2SageAttnForward
 
         logger.info("use sageattn")
         # for layer in model.model.layers:
         #     layer.self_attn.forward = MethodType(Qwen2SageAttnForward, layer.self_attn)
-    elif method == 'full':
+    elif args.method == 'full':
         logger.info('use full attn')
     return model
 
 @torch.no_grad()
-def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, model_name, out_path, method, window_sizes=None, args=None, lock=None):
+def get_pred(rank, world_size, data, max_gen, prompt_format, dataset, device, model_name, out_path, window_sizes=None, args=None, lock=None):
     device = torch.device(f'cuda:{rank}')
     model, tokenizer = load_model_and_tokenizer(model_name, device)
     max_length = model.config.max_position_embeddings - 500
 
-    model = process_model(model, method, window_sizes, args)
+    model = process_model(model, window_sizes, args)
 
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)
@@ -151,12 +151,13 @@ def load_model_and_tokenizer(path, device):
     return model, tokenizer
 
 @torch.no_grad()
-def pred_longbench(model_name, e, output_path, method, window_sizes=None, args=None):
+def pred_longbench(e, window_sizes=None, args=None):
     world_size = torch.cuda.device_count()
     mp.set_start_method('spawn', force=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    output_path = "sparse_quant_attn/eval/longbench"
+    model_name = args.model
     if e:
         datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", \
             "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
@@ -178,10 +179,10 @@ def pred_longbench(model_name, e, output_path, method, window_sizes=None, args=N
         if e:
             data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
             # model_name_for_path = model_name.replace("/", "_") + "_" + str(threshold)
-            model_name_for_path = model_name.split("/")[-1] + "_" + str(method)
-            if not os.path.exists(f"{output_dir}/{model_name_for_path}"):
-                os.makedirs(f"{output_dir}/{model_name_for_path}")
-            out_path = f"{output_dir}/{model_name_for_path}/{dataset}.jsonl"
+            model_name_for_path = model_name.split("/")[-1] + "_" + str(args.method)
+            if not os.path.exists(f"{output_dir}/{model_name_for_path}/bit8_thres_{args.bit8_thres}_bit4_thres_{args.bit4_thres}"):
+                os.makedirs(f"{output_dir}/{model_name_for_path}/bit8_thres_{args.bit8_thres}_bit4_thres_{args.bit4_thres}")
+            out_path = f"{output_dir}/{model_name_for_path}/bit8_thres_{args.bit8_thres}_bit4_thres_{args.bit4_thres}/{dataset}.jsonl"
         else:
             data = load_dataset('THUDM/LongBench', dataset, split='test')
             if not os.path.exists(f"{output_dir}/{model_name_for_path}"):
@@ -194,7 +195,7 @@ def pred_longbench(model_name, e, output_path, method, window_sizes=None, args=N
         processes = []
         for rank in range(world_size):
             p = mp.Process(target=get_pred, args=(rank, world_size, data_subsets[rank], \
-                        max_gen, prompt_format, dataset, device, model_name, out_path, method, window_sizes, args, lock))
+                        max_gen, prompt_format, dataset, device, model_name, out_path, window_sizes, args, lock))
             p.start()
             processes.append(p)
         for p in processes:

@@ -631,8 +631,8 @@ class LMEvalAdaptor(BaseLM):
 def evaluate(model, tokenizer, bits_alloc, args):
     from sparse_quant_attn.eval.longbench.pred import pred_longbench
     from sparse_quant_attn.eval.longbench.eval import eval_longbench
-    pred_longbench(args.model, True, "/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/longbench", args.method, bits_alloc, args)
-    eval_longbench(True, "/mnt/disk3/wzn/SQAttn/sparse_quant_attn/eval/longbench", args.model, args.method)
+    pred_longbench(True, bits_alloc, args)
+    eval_longbench(True, args)
     # exit(0)
     results = {}
     lm = LMEvalAdaptor(args.model, model, tokenizer, args.batch_size)

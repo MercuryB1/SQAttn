@@ -91,13 +91,15 @@ def calculate_averaged_scores(all_scores):
             averaged_results[key] = 0.0
     return averaged_results
 
-def eval_longbench(e, output_path, model_name, method):
+def eval_longbench(e, args):
+    output_path = "sparse_quant_attn/eval/longbench"
+    model_name = args.model
     model_name_for_path = model_name.split("/")[-1]
     scores = dict()
     if e:
-        path = f"pred_e/{model_name_for_path}_{method}/"
+        path = f"pred_e/{model_name_for_path}_{args.method}/bit8_thres_{args.bit8_thres}_bit4_thres_{args.bit4_thres}/"
     else:
-        path = f"pred/{model_name_for_path}_{method}/"
+        path = f"pred/{model_name_for_path}_{args.method}/bit8_thres_{args.bit8_thres}_bit4_thres_{args.bit4_thres}/"
 
     path = f"{output_path}/{path}"
     all_files = os.listdir(path)

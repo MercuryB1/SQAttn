@@ -22,7 +22,7 @@ accelerate==0.34.2
 sentencepiece
 protobuf
 datasets==2.16.0
-transformer==4.52.1
+transformers==4.52.1
 omegaconf
 qtorch
 seaborn
